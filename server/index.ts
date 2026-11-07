@@ -318,6 +318,7 @@ app.get("/api/profile/posts", requireUser, async (_req, res) => {
     const result = await pool.query(
       `SELECT po.id, po.title, po.description, po.image_url, po.visibility, po.created_at,
         (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
+        (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = po.id) AS comments_count,
         EXISTS (SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $2) AS liked_by_me
        FROM posts po WHERE po.user_id = $1 ORDER BY po.created_at DESC`,
       [res.locals.user.id, res.locals.user.id],
@@ -337,13 +338,14 @@ app.get("/api/feed", requireUser, async (_req, res) => {
            po.created_at, u.id AS author_id, u.name AS author_name, u.role AS author_role,
            p.avatar_url, p.city, p.state,
            (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
+           (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = po.id) AS comments_count,
            EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $1) AS liked_by_me
          FROM posts po JOIN users u ON u.id = po.user_id JOIN profiles p ON p.user_id = u.id
          WHERE po.visibility = 'publico' AND p.is_public = TRUE AND u.is_active = TRUE
          UNION ALL
          SELECT 'pedido'::text AS kind, sr.id, sr.title, sr.description, sr.image_url,
            sr.created_at, u.id AS author_id, u.name AS author_name, u.role AS author_role,
-           p.avatar_url, sr.city, sr.state, 0::int AS likes_count, FALSE AS liked_by_me
+           p.avatar_url, sr.city, sr.state, 0::int AS likes_count, 0::int AS comments_count, FALSE AS liked_by_me
          FROM service_requests sr JOIN users u ON u.id = sr.user_id JOIN profiles p ON p.user_id = u.id
          WHERE sr.status IN ('aberto', 'em_analise') AND p.is_public = TRUE AND u.is_active = TRUE
        ) activity ORDER BY created_at DESC LIMIT 60`,
@@ -456,6 +458,54 @@ app.post("/api/posts/:id/reaction", requireUser, async (req, res) => {
     const count = await pool.query("SELECT COUNT(*)::int AS count FROM post_likes WHERE post_id = $1", [postId]);
     res.json({ liked, likesCount: Number(count.rows[0].count) });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível reagir à publicação."); }
+});
+
+app.get("/api/posts/:id/comments", requireUser, async (req, res) => {
+  const postId = Number(req.params.id);
+  if (!Number.isInteger(postId) || postId < 1) return jsonError(res, 400, "Publicação inválida.");
+  try {
+    const post = await pool.query(
+      `SELECT po.id FROM posts po JOIN profiles p ON p.user_id = po.user_id
+       WHERE po.id = $1 AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))`,
+      [postId, res.locals.user.id],
+    );
+    if (!post.rows[0]) return jsonError(res, 404, "Publicação não encontrada ou indisponível.");
+    const result = await pool.query(
+      `SELECT pc.id, pc.post_id, pc.user_id, pc.body, pc.created_at, u.name AS author_name, p.avatar_url AS author_avatar_url
+       FROM post_comments pc JOIN users u ON u.id = pc.user_id
+       LEFT JOIN profiles p ON p.user_id = u.id
+       WHERE pc.post_id = $1 ORDER BY pc.created_at ASC LIMIT 200`,
+      [postId],
+    );
+    res.json({ comments: result.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar os comentários."); }
+});
+
+app.post("/api/posts/:id/comments", requireUser, async (req, res) => {
+  const postId = Number(req.params.id);
+  const body = String(req.body?.body || "").trim();
+  if (!Number.isInteger(postId) || postId < 1) return jsonError(res, 400, "Publicação inválida.");
+  if (!body || body.length > 2000) return jsonError(res, 400, "O comentário deve ter entre 1 e 2.000 caracteres.");
+  try {
+    const result = await pool.query(
+      `INSERT INTO post_comments (post_id, user_id, body)
+       SELECT po.id, $2, $3 FROM posts po JOIN profiles p ON p.user_id = po.user_id
+       WHERE po.id = $1 AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))
+       RETURNING id, post_id, user_id, body, created_at`,
+      [postId, res.locals.user.id, body],
+    );
+    if (!result.rows[0]) return jsonError(res, 404, "Publicação não encontrada ou indisponível.");
+    const [author, count, commenter] = await Promise.all([
+      pool.query("SELECT po.user_id FROM posts po WHERE po.id = $1", [postId]),
+      pool.query("SELECT COUNT(*)::int AS count FROM post_comments WHERE post_id = $1", [postId]),
+      pool.query("SELECT p.avatar_url FROM profiles p WHERE p.user_id = $1", [res.locals.user.id]),
+    ]);
+    const comment = { ...result.rows[0], author_name: res.locals.user.name, author_avatar_url: commenter.rows[0]?.avatar_url || null };
+    if (author.rows[0] && Number(author.rows[0].user_id) !== Number(res.locals.user.id)) {
+      await notifyUser(author.rows[0].user_id, "post_comment", "Novo comentário", `${res.locals.user.name} comentou na sua publicação.`, `/perfil/${author.rows[0].user_id}`);
+    }
+    res.status(201).json({ comment, commentsCount: Number(count.rows[0].count) });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível publicar o comentário."); }
 });
 
 app.get("/api/conversations", requireUser, async (_req, res) => {
@@ -709,6 +759,7 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
       pool.query(
         `SELECT po.id, po.title, po.description, po.image_url, po.created_at,
           (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
+          (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = po.id) AS comments_count,
           EXISTS (SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $2) AS liked_by_me
          FROM posts po WHERE po.user_id = $1 AND po.visibility = 'publico' ORDER BY po.created_at DESC`,
         [professionalId, res.locals.user.id],
