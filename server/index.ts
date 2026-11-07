@@ -514,7 +514,9 @@ app.get("/api/conversations", requireUser, async (_req, res) => {
       `SELECT c.id, c.request_id, c.updated_at,
         CASE WHEN c.customer_id = $1 THEN c.professional_id ELSE c.customer_id END AS other_user_id,
         u.name AS other_user_name, u.role AS other_user_role, p.avatar_url AS other_user_avatar_url,
-        lm.body AS last_message, lm.created_at AS last_message_at
+        lm.body AS last_message, lm.created_at AS last_message_at,
+        (SELECT COUNT(*)::int FROM messages unread
+         WHERE unread.conversation_id = c.id AND unread.sender_id <> $1 AND unread.read_at IS NULL) AS unread_count
        FROM conversations c
        JOIN users u ON u.id = CASE WHEN c.customer_id = $1 THEN c.professional_id ELSE c.customer_id END
        LEFT JOIN profiles p ON p.user_id = u.id
@@ -569,12 +571,12 @@ app.get("/api/conversations/:id/messages", requireUser, async (req, res) => {
   try {
     const conversation = await pool.query("SELECT id FROM conversations WHERE id = $1 AND (customer_id = $2 OR professional_id = $2)", [req.params.id, res.locals.user.id]);
     if (!conversation.rows[0]) return jsonError(res, 404, "Conversa não encontrada.");
-    await pool.query("UPDATE messages SET read_at = NOW() WHERE conversation_id = $1 AND sender_id <> $2 AND read_at IS NULL", [req.params.id, res.locals.user.id]);
+    const markedRead = await pool.query("UPDATE messages SET read_at = NOW() WHERE conversation_id = $1 AND sender_id <> $2 AND read_at IS NULL RETURNING id", [req.params.id, res.locals.user.id]);
     const result = await pool.query(
       `SELECT m.id, m.sender_id, u.name AS sender_name, m.body, m.attachment_url, m.created_at, m.read_at
        FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id = $1 ORDER BY m.created_at ASC`, [req.params.id],
     );
-    res.json({ messages: result.rows });
+    res.json({ messages: result.rows, markedRead: markedRead.rowCount || 0 });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar as mensagens."); }
 });
 

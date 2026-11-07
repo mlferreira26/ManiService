@@ -56,6 +56,6 @@ export const api = {
   createPostComment: (postId: number, body: string) => request<{ comment: Record<string, any>; commentsCount: number }>(`/api/posts/${postId}/comments`, { method: "POST", body: JSON.stringify({ body }) }),
   createConversation: (professionalId: number, requestId?: number, customerId?: number) => request<{ conversation: { id: number } }>("/api/conversations", { method: "POST", body: JSON.stringify({ professionalId, requestId, customerId }) }),
   conversations: () => request<{ conversations: Array<Record<string, any>> }>("/api/conversations"),
-  messages: (conversationId: number) => request<{ messages: Array<Record<string, any>> }>(`/api/conversations/${conversationId}/messages`),
+  messages: (conversationId: number) => request<{ messages: Array<Record<string, any>>; markedRead?: number }>(`/api/conversations/${conversationId}/messages`),
   sendMessage: (conversationId: number, body: string, attachmentUrl?: string) => request<{ message: Record<string, any> }>(`/api/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ body, attachmentUrl }) }),
 };

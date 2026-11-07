@@ -31,7 +31,7 @@ export default function Messages() {
     finally { setLoading(false); }
   }, []);
   const loadMessages = useCallback(async (id: number) => {
-    try { const data = await api.messages(id); if (activeIdRef.current === id) setMessages(data.messages as Message[]); }
+    try { const data = await api.messages(id); if (activeIdRef.current === id) { setMessages(data.messages as Message[]); if (data.markedRead) window.dispatchEvent(new Event("messages-read")); } }
     catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível carregar as mensagens."); }
   }, []);
   useEffect(() => { void loadConversations(); const timer = window.setInterval(() => void loadConversations(), 10000); return () => window.clearInterval(timer); }, [loadConversations]);
