@@ -527,7 +527,8 @@ app.get("/api/users/search", requireUser, async (req, res) => {
       `WITH viewer AS (
          SELECT city, state, latitude, longitude, search_radius_km FROM profiles WHERE user_id = $1
        )
-       SELECT u.id, u.name, u.role, p.avatar_url, p.bio, p.city, p.state, p.latitude, p.longitude,
+       SELECT u.id, u.name, CASE WHEN u.role = 'admin' THEN 'usuario' ELSE u.role END AS role,
+         p.avatar_url, p.bio, p.city, p.state, p.latitude, p.longitude,
          pp.specialty, pp.verified, COALESCE(pp.rating, 0) AS rating,
          COALESCE(pp.total_reviews, 0) AS total_reviews, COALESCE(pp.total_services, 0) AS total_services,
          (SELECT COUNT(*)::int FROM follows f WHERE f.following_id = u.id) AS followers_count,
@@ -539,7 +540,7 @@ app.get("/api/users/search", requireUser, async (req, res) => {
        LEFT JOIN professional_profiles pp ON pp.user_id = u.id
        WHERE u.is_active = TRUE AND p.is_public = TRUE AND u.id <> $1
          AND ($2 = '' OR u.name ILIKE '%' || $2 || '%' OR COALESCE(pp.specialty, '') ILIKE '%' || $2 || '%')
-         AND ($3 = 'todos' OR u.role = $3)
+         AND ($3 = 'todos' OR ($3 = 'usuario' AND u.role IN ('usuario', 'admin')) OR ($3 = 'profissional' AND u.role = 'profissional'))
          AND ($4 = '' OR p.city ILIKE '%' || $4 || '%')
          AND (
            (v.latitude IS NOT NULL AND v.longitude IS NOT NULL AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL
@@ -900,7 +901,8 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
   if (!Number.isInteger(professionalId) || professionalId < 1) return jsonError(res, 400, "Perfil inválido.");
   try {
     const profileResult = await pool.query(
-      `SELECT u.id, u.name, u.role, p.avatar_url, p.cover_url, p.bio, p.neighborhood, p.city, p.state,
+      `SELECT u.id, u.name, CASE WHEN u.role = 'admin' THEN 'usuario' ELSE u.role END AS role,
+        p.avatar_url, p.cover_url, p.bio, p.neighborhood, p.city, p.state,
         p.is_public,
         pp.specialty, pp.description AS professional_description, pp.verified,
         COALESCE((SELECT ROUND(AVG(r.rating)::numeric, 1) FROM reviews r WHERE r.professional_id = u.id), pp.rating, 0) AS rating,
@@ -913,7 +915,8 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
        FROM users u
        JOIN profiles p ON p.user_id = u.id
        LEFT JOIN professional_profiles pp ON pp.user_id = u.id
-       WHERE u.id = $1 AND u.role IN ('profissional', 'usuario') AND u.is_active = TRUE AND (p.is_public = TRUE OR u.id = $2)`,
+       WHERE u.id = $1 AND u.role IN ('profissional', 'usuario', 'admin')
+         AND u.is_active = TRUE AND (p.is_public = TRUE OR u.id = $2)`,
       [professionalId, res.locals.user.id],
     );
     if (!profileResult.rows[0]) return jsonError(res, 404, "Perfil não encontrado.");
