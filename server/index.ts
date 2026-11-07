@@ -990,15 +990,18 @@ app.delete("/api/users/:id/follow", requireUser, async (req, res) => {
 
 app.post("/api/service-requests", requireUser, async (req, res) => {
   const { category, title, description, location, city, state, imageUrl, preferredDate, budgetMin, budgetMax } = req.body || {};
+  const rawImageUrls = req.body?.imageUrls;
+  const imageUrls: string[] = Array.isArray(rawImageUrls) ? rawImageUrls : imageUrl ? [imageUrl] : [];
+  if (imageUrls.length > 2 || imageUrls.some((url) => typeof url !== "string" || url.length > 2048)) return jsonError(res, 400, "Um pedido pode ter até 2 fotos válidas.");
   const latitude = req.body?.latitude == null ? null : Number(req.body.latitude);
   const longitude = req.body?.longitude == null ? null : Number(req.body.longitude);
   if ((latitude == null) !== (longitude == null) || (latitude != null && (!Number.isFinite(latitude) || Math.abs(latitude) > 90)) || (longitude != null && (!Number.isFinite(longitude) || Math.abs(longitude) > 180))) return jsonError(res, 400, "A localização informada é inválida.");
   if (!category || !title || !description) return jsonError(res, 400, "Categoria, título e descrição são obrigatórios.");
   try {
     const result = await pool.query(
-      `INSERT INTO service_requests (user_id, category, title, description, location, city, state, image_url, preferred_date, budget_min, budget_max, latitude, longitude)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
-      [res.locals.user.id, category, title, description, location || null, city || null, state || null, imageUrl || null, preferredDate || null, budgetMin || null, budgetMax || null, latitude, longitude],
+      `INSERT INTO service_requests (user_id, category, title, description, location, city, state, image_url, image_urls, preferred_date, budget_min, budget_max, latitude, longitude)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14) RETURNING *`,
+      [res.locals.user.id, category, title, description, location || null, city || null, state || null, imageUrls[0] || null, JSON.stringify(imageUrls), preferredDate || null, budgetMin || null, budgetMax || null, latitude, longitude],
     );
     const matchingProfessionals = await pool.query(
       `SELECT DISTINCT u.id FROM users u
@@ -1255,6 +1258,8 @@ async function ensureRuntimeSchema() {
     ALTER TABLE profiles ADD COLUMN IF NOT EXISTS notify_local_requests BOOLEAN NOT NULL DEFAULT TRUE;
     ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
     ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+    ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS image_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
+    UPDATE service_requests SET image_urls = jsonb_build_array(image_url) WHERE image_url IS NOT NULL AND image_urls = '[]'::jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
