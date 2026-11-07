@@ -1,0 +1,17 @@
+{
+  "routes": [
+    { "path": "/", "title": "Criar Conta" },
+    { "path": "/inicio", "title": "Apresentação" },
+    { "path": "/para-consumidores", "title": "Para Consumidores" },
+    { "path": "/para-prestadores", "title": "Para Profissionais" },
+    { "path": "/como-funciona", "title": "Como Funciona" },
+    { "path": "/galeria", "title": "Galeria" },
+    { "path": "/contato", "title": "Contato" },
+    { "path": "/criar-conta", "title": "Criar Conta" },
+    { "path": "/login", "title": "Entrar" },
+    { "path": "/painel", "title": "Painel" },
+    { "path": "/perfil", "title": "Perfil" },
+    { "path": "/comunidades", "title": "Comunidades" }
+    ,{ "path": "/profissionais", "title": "Buscar Profissionais" }
+  ]
+}
