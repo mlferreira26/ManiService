@@ -88,7 +88,7 @@ export default function ProfessionalProfile() {
   }
 
   return <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100"><SiteHeader /><main className="container max-w-6xl py-8 md:py-10">
-    <Link href="/profissionais"><a className="mb-5 inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-primary"><ArrowLeft className="h-4 w-4" />Voltar aos profissionais</a></Link>
+    <Link href={isOwnProfile ? "/perfil" : "/profissionais"}><a className="mb-5 inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-primary"><ArrowLeft className="h-4 w-4" />{isOwnProfile ? "Voltar ao meu perfil" : "Voltar aos profissionais"}</a></Link>
     {loading ? <Card><CardContent className="p-10 text-center text-muted-foreground">Carregando perfil...</CardContent></Card> : !profile ? <Card><CardContent className="p-10 text-center">Este perfil não está disponível.</CardContent></Card> : <>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <Card className="overflow-hidden"><div className="h-32 bg-gradient-to-r from-blue-800 via-blue-600 to-cyan-400" />
