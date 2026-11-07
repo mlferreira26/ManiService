@@ -14,7 +14,7 @@ export default function Login() {
   const [, setLocation] = useLocation();
   const { user, login, logout } = useAuth();
   const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get("resetToken") || "");
-  const [mode, setMode] = useState<"login" | "forgot" | "reset">(() => new URLSearchParams(window.location.search).has("resetToken") ? "reset" : "login");
+  const [mode, setMode] = useState<"login" | "forgot" | "reset">(() => { const params = new URLSearchParams(window.location.search); return params.has("resetToken") ? "reset" : params.get("mode") === "forgot" ? "forgot" : "login"; });
   const [form, setForm] = useState({ email: "", password: "", confirmPassword: "" });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");

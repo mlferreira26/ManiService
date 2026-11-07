@@ -95,6 +95,39 @@ async function requireProfessional(req: Request, res: Response, next: NextFuncti
   });
 }
 
+async function notifyUser(userId: number | string, type: string, title: string, body: string, link: string) {
+  await pool.query(
+    `INSERT INTO notifications (user_id, type, title, body, link)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, type, title, body, link],
+  );
+}
+
+app.get("/api/notifications", requireUser, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, type, title, body, link, read_at, created_at
+       FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 30`,
+      [res.locals.user.id],
+    );
+    res.json({ notifications: result.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar as notificações."); }
+});
+
+app.post("/api/notifications/:id/read", requireUser, async (req, res) => {
+  try {
+    await pool.query("UPDATE notifications SET read_at = COALESCE(read_at, NOW()) WHERE id = $1 AND user_id = $2", [req.params.id, res.locals.user.id]);
+    res.json({ ok: true });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar a notificação."); }
+});
+
+app.post("/api/notifications/read-all", requireUser, async (_req, res) => {
+  try {
+    await pool.query("UPDATE notifications SET read_at = NOW() WHERE user_id = $1 AND read_at IS NULL", [res.locals.user.id]);
+    res.json({ ok: true });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar as notificações."); }
+});
+
 app.get("/api/health", async (_req, res) => {
   try {
     const result = await pool.query("SELECT NOW() AS now");
@@ -172,13 +205,64 @@ app.post("/api/auth/logout", async (req, res) => {
 
 app.get("/api/auth/me", requireUser, (req, res) => res.json({ user: safeUser(res.locals.user) }));
 
+app.post("/api/auth/change-password", requireUser, async (req, res) => {
+  const currentPassword = String(req.body?.currentPassword || "");
+  const newPassword = String(req.body?.newPassword || "");
+  if (newPassword.length < 8) return jsonError(res, 400, "A nova senha precisa ter pelo menos 8 caracteres.");
+  try {
+    const account = await pool.query("SELECT password_hash FROM users WHERE id = $1", [res.locals.user.id]);
+    if (!account.rows[0] || !(await verifyPassword(currentPassword, account.rows[0].password_hash))) return jsonError(res, 400, "A senha atual está incorreta.");
+    const passwordHash = await hashPassword(newPassword);
+    await pool.query("UPDATE users SET password_hash = $2 WHERE id = $1", [res.locals.user.id, passwordHash]);
+    const sessionId = getCookie(req, sessionCookieName);
+    await pool.query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2", [res.locals.user.id, sessionId]);
+    res.json({ ok: true, message: "Senha alterada. As outras sessões foram encerradas." });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível alterar a senha."); }
+});
+
+app.get("/api/account/settings", requireUser, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT u.name, u.email, u.role, p.is_public, p.search_radius_km,
+       p.latitude, p.longitude, p.notify_messages, p.notify_local_requests
+       FROM users u JOIN profiles p ON p.user_id = u.id WHERE u.id = $1`,
+      [res.locals.user.id],
+    );
+    if (!result.rows[0]) return jsonError(res, 404, "Configurações da conta não encontradas.");
+    res.json({ settings: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar as configurações."); }
+});
+
+app.put("/api/account/settings", requireUser, async (req, res) => {
+  const radius = Number(req.body?.searchRadiusKm);
+  const latitude = req.body?.latitude == null ? null : Number(req.body.latitude);
+  const longitude = req.body?.longitude == null ? null : Number(req.body.longitude);
+  if (!Number.isInteger(radius) || radius < 1 || radius > 300) return jsonError(res, 400, "Escolha um raio entre 1 e 300 km.");
+  if ((latitude == null) !== (longitude == null) || (latitude != null && (!Number.isFinite(latitude) || Math.abs(latitude) > 90)) || (longitude != null && (!Number.isFinite(longitude) || Math.abs(longitude) > 180))) return jsonError(res, 400, "A localização informada é inválida.");
+  try {
+    await pool.query(
+      `UPDATE profiles SET is_public = $2, search_radius_km = $3, latitude = $4, longitude = $5,
+       notify_messages = $6, notify_local_requests = $7 WHERE user_id = $1`,
+      [res.locals.user.id, req.body?.isPublic === true, radius, latitude, longitude, req.body?.notifyMessages !== false, req.body?.notifyLocalRequests !== false],
+    );
+    res.json({ ok: true });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível salvar as configurações."); }
+});
+
 app.get("/api/profile", requireUser, async (_req, res) => {
   try {
     const result = await pool.query(
       `SELECT u.id, u.name, u.email, u.role, u.phone, p.bio, p.address_line,
         p.neighborhood, p.city, p.state, p.postal_code, p.avatar_url, p.cover_url,
+        p.is_public, p.search_radius_km, p.latitude, p.longitude, p.notify_messages, p.notify_local_requests,
+        (SELECT COUNT(*)::int FROM follows f WHERE f.following_id = u.id) AS followers_count,
+        (SELECT COUNT(*)::int FROM follows f WHERE f.follower_id = u.id) AS following_count,
+        (SELECT COUNT(*)::int FROM reviews r WHERE r.professional_id = u.id) AS reviews_count,
         pp.specialty, pp.description AS professional_description, pp.service_radius_km,
-        pp.hourly_rate, pp.verified, pp.rating, pp.total_reviews, pp.total_services
+        pp.hourly_rate, pp.verified,
+        COALESCE((SELECT ROUND(AVG(r.rating)::numeric, 1) FROM reviews r WHERE r.professional_id = u.id), pp.rating, 0) AS rating,
+        (SELECT COUNT(*)::int FROM reviews r WHERE r.professional_id = u.id) AS total_reviews,
+        pp.total_services
        FROM users u JOIN profiles p ON p.user_id = u.id
        LEFT JOIN professional_profiles pp ON pp.user_id = u.id
        WHERE u.id = $1`, [res.locals.user.id],
@@ -232,15 +316,84 @@ app.put("/api/profile", requireUser, async (req, res) => {
 app.get("/api/profile/posts", requireUser, async (_req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, title, description, image_url, visibility, created_at
-       FROM posts WHERE user_id = $1 ORDER BY created_at DESC`,
-      [res.locals.user.id],
+      `SELECT po.id, po.title, po.description, po.image_url, po.visibility, po.created_at,
+        (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
+        EXISTS (SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $2) AS liked_by_me
+       FROM posts po WHERE po.user_id = $1 ORDER BY po.created_at DESC`,
+      [res.locals.user.id, res.locals.user.id],
     );
     res.json({ posts: result.rows });
   } catch (error) {
     console.error(error);
     jsonError(res, 500, "Não foi possível carregar sua linha do tempo.");
   }
+});
+
+app.get("/api/feed", requireUser, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM (
+         SELECT 'publicacao'::text AS kind, po.id, po.title, po.description, po.image_url,
+           po.created_at, u.id AS author_id, u.name AS author_name, u.role AS author_role,
+           p.avatar_url, p.city, p.state,
+           (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
+           EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $1) AS liked_by_me
+         FROM posts po JOIN users u ON u.id = po.user_id JOIN profiles p ON p.user_id = u.id
+         WHERE po.visibility = 'publico' AND p.is_public = TRUE AND u.is_active = TRUE
+         UNION ALL
+         SELECT 'pedido'::text AS kind, sr.id, sr.title, sr.description, sr.image_url,
+           sr.created_at, u.id AS author_id, u.name AS author_name, u.role AS author_role,
+           p.avatar_url, sr.city, sr.state, 0::int AS likes_count, FALSE AS liked_by_me
+         FROM service_requests sr JOIN users u ON u.id = sr.user_id JOIN profiles p ON p.user_id = u.id
+         WHERE sr.status IN ('aberto', 'em_analise') AND p.is_public = TRUE AND u.is_active = TRUE
+       ) activity ORDER BY created_at DESC LIMIT 60`,
+      [res.locals.user.id],
+    );
+    res.json({ items: result.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar as atividades."); }
+});
+
+app.get("/api/users/search", requireUser, async (req, res) => {
+  const search = String(req.query.search || "").trim();
+  const role = String(req.query.role || "todos");
+  const city = String(req.query.city || "").trim();
+  const requestedRadius = Number(req.query.radius || 0);
+  if (search.length > 100 || city.length > 100 || !["todos", "usuario", "profissional"].includes(role)) return jsonError(res, 400, "Filtro de busca inválido.");
+  if (requestedRadius && (!Number.isInteger(requestedRadius) || requestedRadius < 1 || requestedRadius > 300)) return jsonError(res, 400, "A distância de busca deve ficar entre 1 e 300 km.");
+  try {
+    const result = await pool.query(
+      `WITH viewer AS (
+         SELECT city, state, latitude, longitude, search_radius_km FROM profiles WHERE user_id = $1
+       )
+       SELECT u.id, u.name, u.role, p.avatar_url, p.bio, p.city, p.state, p.latitude, p.longitude,
+         pp.specialty, pp.verified, COALESCE(pp.rating, 0) AS rating,
+         COALESCE(pp.total_reviews, 0) AS total_reviews, COALESCE(pp.total_services, 0) AS total_services,
+         (SELECT COUNT(*)::int FROM follows f WHERE f.following_id = u.id) AS followers_count,
+         CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND v.latitude IS NOT NULL AND v.longitude IS NOT NULL THEN
+           ROUND((6371 * 2 * ASIN(SQRT(LEAST(1, GREATEST(0,
+             POWER(SIN(RADIANS(p.latitude-v.latitude)/2), 2) + COS(RADIANS(v.latitude))*COS(RADIANS(p.latitude))*POWER(SIN(RADIANS(p.longitude-v.longitude)/2), 2)
+           )))))::numeric, 1) ELSE NULL END AS distance_km
+       FROM users u JOIN profiles p ON p.user_id = u.id CROSS JOIN viewer v
+       LEFT JOIN professional_profiles pp ON pp.user_id = u.id
+       WHERE u.is_active = TRUE AND p.is_public = TRUE AND u.id <> $1
+         AND ($2 = '' OR u.name ILIKE '%' || $2 || '%' OR COALESCE(pp.specialty, '') ILIKE '%' || $2 || '%')
+         AND ($3 = 'todos' OR u.role = $3)
+         AND ($4 = '' OR p.city ILIKE '%' || $4 || '%')
+         AND (
+           (v.latitude IS NOT NULL AND v.longitude IS NOT NULL AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+             AND 6371 * 2 * ASIN(SQRT(LEAST(1, GREATEST(0,
+               POWER(SIN(RADIANS(p.latitude-v.latitude)/2), 2) + COS(RADIANS(v.latitude))*COS(RADIANS(p.latitude))*POWER(SIN(RADIANS(p.longitude-v.longitude)/2), 2)
+             )))) <= CASE WHEN $5 > 0 THEN $5 ELSE v.search_radius_km END)
+           OR ((v.latitude IS NULL OR v.longitude IS NULL OR p.latitude IS NULL OR p.longitude IS NULL)
+             AND LOWER(COALESCE(p.city,'')) = LOWER(COALESCE(v.city,''))
+             AND LOWER(COALESCE(p.state,'')) = LOWER(COALESCE(v.state,'')) AND COALESCE(p.city,'') <> '')
+           OR ($4 <> '' AND p.city ILIKE '%' || $4 || '%')
+         )
+       ORDER BY (u.role = 'profissional') DESC, pp.verified DESC NULLS LAST, pp.rating DESC NULLS LAST, u.name ASC LIMIT 100`,
+      [res.locals.user.id, search, role, city, Number.isInteger(requestedRadius) ? requestedRadius : 0],
+    );
+    res.json({ users: result.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível pesquisar usuários."); }
 });
 
 app.post("/api/profile/posts", requireUser, async (req, res) => {
@@ -274,6 +427,35 @@ app.delete("/api/profile/posts/:id", requireUser, async (req, res) => {
     console.error(error);
     jsonError(res, 500, "Não foi possível excluir a publicação.");
   }
+});
+
+app.post("/api/posts/:id/reaction", requireUser, async (req, res) => {
+  const postId = Number(req.params.id);
+  if (!Number.isInteger(postId) || postId < 1) return jsonError(res, 400, "Publicação inválida.");
+  try {
+    const removed = await pool.query(
+      `DELETE FROM post_likes pl USING posts po, profiles p
+       WHERE pl.post_id = $1 AND pl.user_id = $2 AND po.id = pl.post_id AND p.user_id = po.user_id
+       RETURNING pl.post_id`,
+      [postId, res.locals.user.id],
+    );
+    let liked = false;
+    if (!removed.rows[0]) {
+      const added = await pool.query(
+        `INSERT INTO post_likes (post_id, user_id)
+         SELECT po.id, $2 FROM posts po JOIN profiles p ON p.user_id = po.user_id
+         WHERE po.id = $1 AND po.visibility = 'publico' AND p.is_public = TRUE
+         ON CONFLICT DO NOTHING RETURNING post_id`,
+        [postId, res.locals.user.id],
+      );
+      if (!added.rows[0]) return jsonError(res, 404, "Publicação não encontrada ou indisponível.");
+      liked = true;
+      const owner = await pool.query("SELECT po.user_id, u.name FROM posts po JOIN users u ON u.id = po.user_id WHERE po.id = $1", [postId]);
+      if (owner.rows[0]) await notifyUser(owner.rows[0].user_id, "post_reaction", "Nova reação", `${res.locals.user.name} reagiu à sua publicação.`, `/perfil/${owner.rows[0].user_id}`);
+    }
+    const count = await pool.query("SELECT COUNT(*)::int AS count FROM post_likes WHERE post_id = $1", [postId]);
+    res.json({ liked, likesCount: Number(count.rows[0].count) });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível reagir à publicação."); }
 });
 
 app.get("/api/conversations", requireUser, async (_req, res) => {
@@ -339,7 +521,7 @@ app.get("/api/conversations/:id/messages", requireUser, async (req, res) => {
     if (!conversation.rows[0]) return jsonError(res, 404, "Conversa não encontrada.");
     await pool.query("UPDATE messages SET read_at = NOW() WHERE conversation_id = $1 AND sender_id <> $2 AND read_at IS NULL", [req.params.id, res.locals.user.id]);
     const result = await pool.query(
-      `SELECT m.id, m.sender_id, u.name AS sender_name, m.body, m.created_at, m.read_at
+      `SELECT m.id, m.sender_id, u.name AS sender_name, m.body, m.attachment_url, m.created_at, m.read_at
        FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id = $1 ORDER BY m.created_at ASC`, [req.params.id],
     );
     res.json({ messages: result.rows });
@@ -347,18 +529,28 @@ app.get("/api/conversations/:id/messages", requireUser, async (req, res) => {
 });
 
 app.post("/api/conversations/:id/messages", requireUser, async (req, res) => {
-  const body = String(req.body?.body || "").trim();
-  if (!body) return jsonError(res, 400, "Digite uma mensagem antes de enviar.");
+  const attachmentUrl = String(req.body?.attachmentUrl || "").trim() || null;
+  const body = String(req.body?.body || "").trim() || (attachmentUrl ? "Foto" : "");
+  if (!body) return jsonError(res, 400, "Digite uma mensagem ou anexe uma foto.");
   if (body.length > 5000) return jsonError(res, 400, "A mensagem deve ter até 5.000 caracteres.");
   try {
     const result = await pool.query(
-      `INSERT INTO messages (conversation_id, sender_id, body)
-       SELECT c.id, $2, $3 FROM conversations c WHERE c.id = $1 AND (c.customer_id = $2 OR c.professional_id = $2)
-       RETURNING id, conversation_id, sender_id, body, created_at, read_at`,
-      [req.params.id, res.locals.user.id, body],
+      `INSERT INTO messages (conversation_id, sender_id, body, attachment_url)
+       SELECT c.id, $2, $3, $4 FROM conversations c WHERE c.id = $1 AND (c.customer_id = $2 OR c.professional_id = $2)
+       RETURNING id, conversation_id, sender_id, body, attachment_url, created_at, read_at`,
+      [req.params.id, res.locals.user.id, body, attachmentUrl],
     );
     if (!result.rows[0]) return jsonError(res, 404, "Conversa não encontrada.");
     await pool.query("UPDATE conversations SET updated_at = NOW() WHERE id = $1", [req.params.id]);
+    const recipient = await pool.query(
+      `SELECT CASE WHEN customer_id = $2 THEN professional_id ELSE customer_id END AS user_id
+       FROM conversations WHERE id = $1`,
+      [req.params.id, res.locals.user.id],
+    );
+    if (recipient.rows[0]) {
+      const preferences = await pool.query("SELECT notify_messages FROM profiles WHERE user_id = $1", [recipient.rows[0].user_id]);
+      if (preferences.rows[0]?.notify_messages !== false) await notifyUser(recipient.rows[0].user_id, "message", "Nova mensagem", `${res.locals.user.name} enviou uma mensagem.`, `/mensagens?conversation=${result.rows[0].conversation_id}`);
+    }
     res.status(201).json({ message: result.rows[0] });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível enviar a mensagem."); }
 });
@@ -497,6 +689,7 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
   try {
     const profileResult = await pool.query(
       `SELECT u.id, u.name, u.role, p.avatar_url, p.cover_url, p.bio, p.neighborhood, p.city, p.state,
+        p.is_public,
         pp.specialty, pp.description AS professional_description, pp.verified,
         COALESCE((SELECT ROUND(AVG(r.rating)::numeric, 1) FROM reviews r WHERE r.professional_id = u.id), pp.rating, 0) AS rating,
         (SELECT COUNT(*)::int FROM reviews r WHERE r.professional_id = u.id) AS total_reviews,
@@ -508,12 +701,18 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
        FROM users u
        JOIN profiles p ON p.user_id = u.id
        LEFT JOIN professional_profiles pp ON pp.user_id = u.id
-       WHERE u.id = $1 AND u.role IN ('profissional', 'usuario') AND u.is_active = TRUE`,
+       WHERE u.id = $1 AND u.role IN ('profissional', 'usuario') AND u.is_active = TRUE AND (p.is_public = TRUE OR u.id = $2)`,
       [professionalId, res.locals.user.id],
     );
     if (!profileResult.rows[0]) return jsonError(res, 404, "Perfil não encontrado.");
     const [posts, reviews] = await Promise.all([
-      pool.query("SELECT id, title, description, image_url, created_at FROM posts WHERE user_id = $1 AND visibility = 'publico' ORDER BY created_at DESC", [professionalId]),
+      pool.query(
+        `SELECT po.id, po.title, po.description, po.image_url, po.created_at,
+          (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
+          EXISTS (SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $2) AS liked_by_me
+         FROM posts po WHERE po.user_id = $1 AND po.visibility = 'publico' ORDER BY po.created_at DESC`,
+        [professionalId, res.locals.user.id],
+      ),
       pool.query(
         `SELECT r.id, r.rating, r.comment, r.created_at, u.name AS reviewer_name
          FROM reviews r JOIN users u ON u.id = r.reviewer_id
@@ -550,13 +749,35 @@ app.delete("/api/users/:id/follow", requireUser, async (req, res) => {
 
 app.post("/api/service-requests", requireUser, async (req, res) => {
   const { category, title, description, location, city, state, imageUrl, preferredDate, budgetMin, budgetMax } = req.body || {};
+  const latitude = req.body?.latitude == null ? null : Number(req.body.latitude);
+  const longitude = req.body?.longitude == null ? null : Number(req.body.longitude);
+  if ((latitude == null) !== (longitude == null) || (latitude != null && (!Number.isFinite(latitude) || Math.abs(latitude) > 90)) || (longitude != null && (!Number.isFinite(longitude) || Math.abs(longitude) > 180))) return jsonError(res, 400, "A localização informada é inválida.");
   if (!category || !title || !description) return jsonError(res, 400, "Categoria, título e descrição são obrigatórios.");
   try {
     const result = await pool.query(
-      `INSERT INTO service_requests (user_id, category, title, description, location, city, state, image_url, preferred_date, budget_min, budget_max)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [res.locals.user.id, category, title, description, location || null, city || null, state || null, imageUrl || null, preferredDate || null, budgetMin || null, budgetMax || null],
+      `INSERT INTO service_requests (user_id, category, title, description, location, city, state, image_url, preferred_date, budget_min, budget_max, latitude, longitude)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      [res.locals.user.id, category, title, description, location || null, city || null, state || null, imageUrl || null, preferredDate || null, budgetMin || null, budgetMax || null, latitude, longitude],
     );
+    const matchingProfessionals = await pool.query(
+      `SELECT DISTINCT u.id FROM users u
+       JOIN profiles p ON p.user_id = u.id
+       JOIN professional_profiles pp ON pp.user_id = u.id
+       WHERE u.role = 'profissional' AND u.is_active = TRUE AND u.id <> $1
+         AND p.notify_local_requests = TRUE
+         AND (LOWER(pp.specialty) LIKE '%' || LOWER($2) || '%' OR LOWER($2) LIKE '%' || LOWER(pp.specialty) || '%' OR LOWER(pp.specialty) LIKE '%serviço geral%')
+         AND (
+           ($3::double precision IS NOT NULL AND $4::double precision IS NOT NULL AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+             AND 6371 * 2 * ASIN(SQRT(LEAST(1, GREATEST(0,
+               POWER(SIN(RADIANS(p.latitude-$3)/2), 2) + COS(RADIANS($3))*COS(RADIANS(p.latitude))*POWER(SIN(RADIANS(p.longitude-$4)/2), 2)
+             )))) <= COALESCE(pp.service_radius_km, p.search_radius_km))
+           OR (LOWER(COALESCE(p.city,'')) = LOWER(COALESCE($5,'')) AND LOWER(COALESCE(p.state,'')) = LOWER(COALESCE($6,'')) AND COALESCE($5,'') <> '')
+         )`,
+      [res.locals.user.id, category, result.rows[0].latitude ?? null, result.rows[0].longitude ?? null, city || null, state || null],
+    );
+    await Promise.all(matchingProfessionals.rows.map((professional) =>
+      notifyUser(professional.id, "local_service", "Novo pedido na sua região", `${String(category)}: ${String(title)}`, "/comunidades"),
+    ));
     res.status(201).json({ request: result.rows[0] });
   } catch (error) {
     console.error(error);
@@ -737,11 +958,45 @@ app.post("/api/uploads", requireUser, async (req, res) => {
   const buffer = Buffer.from(match[2], "base64");
   if (buffer.length > 5 * 1024 * 1024) return jsonError(res, 413, "A imagem deve ter no máximo 5 MB.");
   const extension = match[1] === "jpeg" ? "jpg" : match[1];
-  const safeName = `${Date.now()}-${randomBytes(5).toString("hex")}.${extension}`;
-  const uploadDir = path.resolve(process.env.UPLOAD_DIR || (isProduction ? path.join(__dirname, "public", "uploads") : path.join(__dirname, "..", "client", "public", "uploads")));
+  const safeName = `${res.locals.user.id}/${randomUUID()}.${extension}`;
+  if (isProduction) {
+    const supabaseUrl = process.env.SUPABASE_URL?.replace(/\/$/, "");
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const bucket = process.env.SUPABASE_STORAGE_BUCKET || "maniservice-media";
+    if (!supabaseUrl || !serviceKey) return jsonError(res, 503, "O armazenamento persistente de fotos ainda não foi configurado no servidor.");
+    try {
+      const headers = { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, "Content-Type": "application/json" };
+      const bucketsResult = await fetch(`${supabaseUrl}/storage/v1/bucket`, { headers });
+      if (!bucketsResult.ok) {
+        console.error("Supabase Storage não listou os buckets:", bucketsResult.status, await bucketsResult.text());
+        return jsonError(res, 502, "Não foi possível verificar o armazenamento das fotos.");
+      }
+      const existingBuckets = await bucketsResult.json() as Array<{ id?: string; name?: string }>;
+      if (!existingBuckets.some((entry) => entry.id === bucket || entry.name === bucket)) {
+        const bucketResult = await fetch(`${supabaseUrl}/storage/v1/bucket`, { method: "POST", headers, body: JSON.stringify({ id: bucket, name: bucket, public: true, file_size_limit: 5242880, allowed_mime_types: ["image/png", "image/jpeg", "image/webp"] }) });
+        if (!bucketResult.ok && bucketResult.status !== 409) {
+          console.error("Supabase Storage não criou o bucket:", bucketResult.status, await bucketResult.text());
+          return jsonError(res, 502, "Não foi possível preparar o armazenamento das fotos.");
+        }
+      }
+      const uploadResult = await fetch(`${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${safeName}`, {
+        method: "POST",
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, "Content-Type": `image/${match[1] === "jpg" ? "jpeg" : match[1]}`, "x-upsert": "false" },
+        body: new Uint8Array(buffer),
+      });
+      if (!uploadResult.ok) {
+        console.error("Supabase Storage recusou o upload:", uploadResult.status, await uploadResult.text());
+        return jsonError(res, 502, "Não foi possível salvar a foto no armazenamento persistente.");
+      }
+      res.status(201).json({ url: `${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(bucket)}/${safeName}`, filename: path.basename(safeName) });
+    } catch (error) { console.error("Falha ao enviar foto ao Supabase Storage:", error); jsonError(res, 502, "Não foi possível salvar a foto agora."); }
+    return;
+  }
+  const localName = `${Date.now()}-${randomBytes(5).toString("hex")}.${extension}`;
+  const uploadDir = path.resolve(process.env.UPLOAD_DIR || path.join(__dirname, "..", "client", "public", "uploads"));
   await mkdir(uploadDir, { recursive: true });
-  await writeFile(path.join(uploadDir, safeName), buffer);
-  res.status(201).json({ url: `/uploads/${safeName}`, filename: safeName });
+  await writeFile(path.join(uploadDir, localName), buffer);
+  res.status(201).json({ url: `/uploads/${localName}`, filename: localName });
 });
 
 const staticPath = isProduction ? path.resolve(__dirname, "public") : path.resolve(__dirname, "..", "client", "public");
@@ -749,4 +1004,22 @@ const indexPath = isProduction ? path.join(staticPath, "index.html") : path.reso
 app.use(express.static(staticPath));
 app.get("*", (_req, res) => res.sendFile(indexPath));
 
-server.listen(port, "0.0.0.0", () => console.log(`Server running on http://localhost:${port}/`));
+async function ensureRuntimeSchema() {
+  await pool.query(`
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS search_radius_km INTEGER NOT NULL DEFAULT 25;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS notify_messages BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS notify_local_requests BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+    ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;
+    CREATE INDEX IF NOT EXISTS profiles_location_idx ON profiles (latitude, longitude);
+    CREATE INDEX IF NOT EXISTS notifications_unread_idx ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
+  `);
+}
+
+ensureRuntimeSchema()
+  .then(() => server.listen(port, "0.0.0.0", () => console.log(`Server running on http://localhost:${port}/`)))
+  .catch((error) => { console.error("Não foi possível preparar as tabelas/colunas do ManiService:", error); process.exit(1); });

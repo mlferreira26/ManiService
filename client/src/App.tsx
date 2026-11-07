@@ -19,6 +19,8 @@ import Professionals from "./pages/ProfessionalsLive";
 import ProfilePage from "./pages/ProfilePage";
 import ProfessionalProfile from "./pages/ProfessionalProfile";
 import Messages from "./pages/Messages";
+import AccountSettings from "./pages/AccountSettings";
+import ActivityFeed from "./pages/ActivityFeed";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -42,7 +44,7 @@ function AccountRoute() {
 function LoginRoute() {
   const { user, loading } = useAuth();
   if (loading) return <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">Verificando seu acesso...</div>;
-  return user ? <Redirect to="/painel" /> : <Login />;
+  return user && !new URLSearchParams(window.location.search).has("mode") ? <Redirect to="/painel" /> : <Login />;
 }
 
 function Router() {
@@ -60,6 +62,8 @@ function Router() {
     <Route path="/perfil/:id"><Guarded><ProfessionalProfile /></Guarded></Route>
     <Route path="/perfil"><Guarded><ProfilePage /></Guarded></Route>
     <Route path="/mensagens"><Guarded><Messages /></Guarded></Route>
+    <Route path="/configuracoes"><Guarded><AccountSettings /></Guarded></Route>
+    <Route path="/servicos"><Guarded><ActivityFeed /></Guarded></Route>
     <Route path="/comunidades"><Guarded><Communities /></Guarded></Route>
     <Route path="/profissionais"><Guarded><Professionals /></Guarded></Route>
     <Route path="/404" component={NotFound} />

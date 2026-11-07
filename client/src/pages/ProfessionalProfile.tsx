@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useRoute } from "wouter";
-import { ArrowLeft, BriefcaseBusiness, CheckCircle2, MapPin, MessageCircle, Star, UserRoundPlus, Users } from "lucide-react";
+import { ArrowLeft, BriefcaseBusiness, CheckCircle2, Heart, MapPin, MessageCircle, Star, UserRoundPlus, Users } from "lucide-react";
 import { toast } from "sonner";
 import SiteHeader from "@/components/SiteHeader";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +12,7 @@ import { useAuth } from "@/contexts/AuthContext";
 
 type Data = Record<string, any>;
 type Review = { id: number; reviewer_name: string; rating: number; comment?: string | null; created_at: string };
-type Post = { id: number; title: string; description: string; image_url?: string | null; created_at: string };
+type Post = { id: number; title: string; description: string; image_url?: string | null; created_at: string; likes_count?: number; liked_by_me?: boolean };
 const dateLabel = (value: string) => new Date(value).toLocaleDateString("pt-BR", { day: "numeric", month: "long", year: "numeric" });
 
 export default function ProfessionalProfile() {
@@ -74,6 +74,13 @@ export default function ProfessionalProfile() {
     finally { setSubmittingReview(false); }
   }
 
+  async function reactToPost(post: Post) {
+    try {
+      const result = await api.reactToPost(post.id);
+      setPosts((current) => current.map((item) => item.id === post.id ? { ...item, liked_by_me: result.liked, likes_count: result.likesCount } : item));
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível reagir à publicação."); }
+  }
+
   return <div className="min-h-screen bg-slate-50"><SiteHeader /><main className="container max-w-6xl py-8 md:py-10">
     <Link href="/profissionais"><a className="mb-5 inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-primary"><ArrowLeft className="h-4 w-4" />Voltar aos profissionais</a></Link>
     {loading ? <Card><CardContent className="p-10 text-center text-muted-foreground">Carregando perfil...</CardContent></Card> : !profile ? <Card><CardContent className="p-10 text-center">Este perfil não está disponível.</CardContent></Card> : <>
@@ -92,7 +99,7 @@ export default function ProfessionalProfile() {
 
       {!isOwnProfile && ["usuario", "profissional"].includes(String(user?.role)) && <Card className="mt-6"><CardHeader><CardTitle className="text-lg">Avaliar {profile.name}</CardTitle></CardHeader><CardContent>{profile.has_reviewed ? <p className="text-sm text-muted-foreground">Você já avaliou este perfil. Obrigado por compartilhar sua experiência.</p> : <><p className="mb-3 text-sm text-muted-foreground">Avalie alguém com quem você conversou pelo ManiService.</p><form onSubmit={submitReview} className="space-y-3"><div className="flex items-center gap-1" aria-label={`Nota selecionada: ${rating} de 5`}>{[1, 2, 3, 4, 5].map((value) => <button key={value} type="button" onClick={() => setRating(value)} aria-label={`${value} estrelas`}><Star className={`h-6 w-6 ${value <= rating ? "fill-amber-400 text-amber-400" : "text-slate-300"}`} /></button>)}</div><Textarea value={comment} maxLength={2000} onChange={(event) => setComment(event.target.value)} placeholder="Conte como foi sua experiência (opcional)" /><div className="flex justify-end"><Button type="submit" disabled={submittingReview}>{submittingReview ? "Enviando..." : "Publicar avaliação"}</Button></div></form></>}</CardContent></Card>}
 
-      <section className="mt-8"><div className="mb-4 flex items-center gap-2"><BriefcaseBusiness className="h-5 w-5 text-primary" /><div><h2 className="text-2xl font-bold">Linha do tempo</h2><p className="text-sm text-muted-foreground">Publicações deste profissional.</p></div></div>{posts.length ? <div className="space-y-4">{posts.map((post) => <Card key={post.id} className="overflow-hidden"><CardContent className="p-5">{post.image_url && <img src={post.image_url} alt={post.title} className="mb-4 max-h-96 w-full rounded-xl object-cover" />}<p className="mb-2 text-xs text-muted-foreground">{dateLabel(post.created_at)}</p><h3 className="text-lg font-bold">{post.title}</h3><p className="mt-2 whitespace-pre-line text-sm leading-6 text-muted-foreground">{post.description}</p></CardContent></Card>)}</div> : <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">Este profissional ainda não publicou na linha do tempo.</CardContent></Card>}</section>
+      <section className="mt-8"><div className="mb-4 flex items-center gap-2"><BriefcaseBusiness className="h-5 w-5 text-primary" /><div><h2 className="text-2xl font-bold">Linha do tempo</h2><p className="text-sm text-muted-foreground">Publicações de {profile.role === "profissional" ? "este profissional" : "este consumidor"}.</p></div></div>{posts.length ? <div className="space-y-4">{posts.map((post) => <Card key={post.id} className="overflow-hidden"><CardContent className="p-5">{post.image_url && <img src={post.image_url} alt={post.title} className="mb-4 max-h-96 w-full rounded-xl object-cover" />}<p className="mb-2 text-xs text-muted-foreground">{dateLabel(post.created_at)}</p><h3 className="text-lg font-bold">{post.title}</h3><p className="mt-2 whitespace-pre-line text-sm leading-6 text-muted-foreground">{post.description}</p><div className="mt-4 border-t pt-3"><Button type="button" variant={post.liked_by_me ? "default" : "outline"} size="sm" onClick={() => void reactToPost(post)}><Heart className={`mr-2 h-4 w-4 ${post.liked_by_me ? "fill-current" : ""}`} />{post.likes_count || 0} {post.likes_count === 1 ? "reação" : "reações"}</Button></div></CardContent></Card>)}</div> : <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">Este perfil ainda não publicou na linha do tempo.</CardContent></Card>}</section>
     </>}
   </main></div>;
 }

@@ -27,7 +27,8 @@ O arquivo `render.yaml` prepara um serviço web Node para construir e servir o f
 - `APP_URL`: URL pública atribuída ao serviço; depois, atualize para `https://maniservice.com.br` quando o domínio estiver conectado.
 - `MAIL_FROM` e `RESEND_API_KEY`: remetente permitido e chave de envio do Resend para recuperação de senha. Consulte `EMAIL_SETUP.md`.
 - `SESSION_SECRET`: valor secreto longo e aleatório; o Blueprint solicita este valor.
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` e `SUPABASE_STORAGE_BUCKET`: necessários para fotos persistentes de perfis, publicações, pedidos e mensagens. Veja `STORAGE_SETUP.md`.
 
-O upload atual salva imagens no disco local do serviço. Esse armazenamento pode ser apagado em novos deploys ou reinicializações; antes de usar com clientes reais, configure armazenamento persistente ou um serviço de arquivos.
+Não use a chave `service_role` no navegador nem faça commit dela. Configure-a somente no ambiente privado do serviço no Render. O servidor cria o bucket público de imagens na primeira utilização, caso ele ainda não exista.
 
 O aceite de propostas com pagamento retido permanece desabilitado até a integração Marketplace do PagBank ser habilitada e configurada.

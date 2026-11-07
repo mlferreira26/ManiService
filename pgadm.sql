@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE INDEX IF NOT EXISTS profiles_city_state_idx
   ON profiles (city, state);
 
+-- Preferências de privacidade, busca regional e alertas.
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS search_radius_km INTEGER NOT NULL DEFAULT 25;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS notify_messages BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS notify_local_requests BOOLEAN NOT NULL DEFAULT TRUE;
+CREATE INDEX IF NOT EXISTS profiles_location_idx ON profiles (latitude, longitude);
+
 CREATE TABLE IF NOT EXISTS professional_profiles (
   id BIGSERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -170,6 +179,8 @@ CREATE INDEX IF NOT EXISTS service_requests_location_idx
   ON service_requests (city, state);
 CREATE INDEX IF NOT EXISTS service_requests_user_idx
   ON service_requests (user_id);
+ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS service_request_interests (
   request_id BIGINT NOT NULL REFERENCES service_requests(id) ON DELETE CASCADE,
@@ -233,6 +244,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_conversation_created_idx
   ON messages (conversation_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages (sender_id);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;
 
 -- =========================================================
 -- Serviços contratados, avaliações e denúncias
