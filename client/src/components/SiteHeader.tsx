@@ -1,4 +1,4 @@
-import { Bell, BriefcaseBusiness, ChevronDown, LayoutDashboard, LogOut, Menu, MessageCircle, Users } from "lucide-react";
+import { Bell, BriefcaseBusiness, ChevronDown, LayoutDashboard, LogOut, Menu, MessageCircle, Search, Users } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ export default function SiteHeader() {
   const [menuOpen, setMenuOpen] = useState(false);
   const { user, loading, logout } = useAuth();
   const appLinks = [
-    { href: "/profissionais", label: "Buscar profissionais" },
+    { href: "/profissionais", label: "Buscar profissionais", icon: Search },
     { href: "/comunidades", label: "Comunidades", icon: Users },
     { href: "/mensagens", label: "Mensagens", icon: MessageCircle },
     { href: "/perfil", label: "Meu perfil", icon: BriefcaseBusiness },
