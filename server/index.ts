@@ -231,6 +231,28 @@ app.patch("/api/admin/reports/:id", requireAdmin, async (req, res) => {
   finally { client?.release(); }
 });
 
+app.get("/api/admin/users", requireAdmin, async (req, res) => {
+  const search = String(req.query.search || "").trim();
+  const role = String(req.query.role || "todos");
+  const active = String(req.query.active || "todos");
+  const requestedOffset = Number(req.query.offset || 0);
+  if (search.length > 100 || !["todos", "usuario", "profissional", "admin"].includes(role) || !["todos", "ativos", "inativos"].includes(active)) return jsonError(res, 400, "Filtro de contas inválido.");
+  if (!Number.isInteger(requestedOffset) || requestedOffset < 0 || requestedOffset > 100000) return jsonError(res, 400, "Página inválida.");
+  try {
+    const result = await pool.query(
+      `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.last_login_at,
+        p.city, p.state, COUNT(*) OVER()::int AS total_count
+       FROM users u LEFT JOIN profiles p ON p.user_id = u.id
+       WHERE ($1 = '' OR u.name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
+         AND ($2 = 'todos' OR u.role = $2)
+         AND ($3 = 'todos' OR ($3 = 'ativos' AND u.is_active = TRUE) OR ($3 = 'inativos' AND u.is_active = FALSE))
+       ORDER BY u.created_at DESC, u.id DESC LIMIT 50 OFFSET $4`,
+      [search, role, active, requestedOffset],
+    );
+    res.json({ users: result.rows.map(({ total_count: _totalCount, ...user }) => user), total: Number(result.rows[0]?.total_count || 0), offset: requestedOffset, limit: 50 });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar a lista de contas."); }
+});
+
 app.get("/api/health", async (_req, res) => {
   try {
     const result = await pool.query("SELECT NOW() AS now");

@@ -25,6 +25,7 @@ export const api = {
   createReport: (payload: { targetType: "profile" | "post" | "request" | "message"; targetId: number; reason: string; details?: string }) => request<{ ok: boolean; message: string }>("/api/reports", { method: "POST", body: JSON.stringify(payload) }),
   adminReports: (status = "todas") => request<{ reports: Array<Record<string, any>> }>(`/api/admin/reports?status=${encodeURIComponent(status)}`),
   updateAdminReport: (id: number, status: string, reviewNote?: string) => request<{ report: Record<string, any> }>(`/api/admin/reports/${id}`, { method: "PATCH", body: JSON.stringify({ status, reviewNote }) }),
+  adminUsers: (params = "") => request<{ users: Array<Record<string, any>>; total: number; offset: number; limit: number }>(`/api/admin/users${params ? `?${params}` : ""}`),
   feed: () => request<{ items: Array<Record<string, any>> }>("/api/feed"),
   searchUsers: (params = "") => request<{ users: Array<Record<string, any>> }>(`/api/users/search${params ? `?${params}` : ""}`),
   forgotPassword: (email: string) => request<{ ok: boolean }>("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
