@@ -674,7 +674,8 @@ app.get("/api/conversations", requireUser, async (_req, res) => {
     const result = await pool.query(
       `SELECT c.id, c.request_id, c.updated_at,
         CASE WHEN c.customer_id = $1 THEN c.professional_id ELSE c.customer_id END AS other_user_id,
-        u.name AS other_user_name, u.role AS other_user_role, p.avatar_url AS other_user_avatar_url,
+        CASE WHEN u.role = 'admin' THEN 'Equipe ManiService' ELSE u.name END AS other_user_name,
+        u.role AS other_user_role, p.avatar_url AS other_user_avatar_url,
         lm.body AS last_message, lm.created_at AS last_message_at,
         (SELECT COUNT(*)::int FROM messages unread
          WHERE unread.conversation_id = c.id AND unread.sender_id <> $1 AND unread.read_at IS NULL) AS unread_count
@@ -728,13 +729,34 @@ app.post("/api/conversations", requireUser, async (req, res) => {
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível iniciar a conversa."); }
 });
 
+app.post("/api/admin/users/:id/conversation", requireAdmin, async (req, res) => {
+  const targetId = Number(req.params.id);
+  const adminId = Number(res.locals.user.id);
+  if (!Number.isInteger(targetId) || targetId < 1 || targetId === adminId) return jsonError(res, 400, "Selecione uma conta válida para contatar.");
+  try {
+    const target = await pool.query("SELECT id FROM users WHERE id = $1 AND is_active = TRUE", [targetId]);
+    if (!target.rows[0]) return jsonError(res, 404, "A conta não existe ou está inativa.");
+    const existing = await pool.query(
+      `SELECT id FROM conversations
+       WHERE customer_id = $1 AND professional_id = $2 AND request_id IS NULL AND proposal_id IS NULL
+       ORDER BY id LIMIT 1`, [adminId, targetId],
+    );
+    const conversation = existing.rows[0] || (await pool.query(
+      `INSERT INTO conversations (customer_id, professional_id)
+       VALUES ($1, $2) RETURNING id`, [adminId, targetId],
+    )).rows[0];
+    res.status(201).json({ conversation });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível iniciar o contato administrativo."); }
+});
+
 app.get("/api/conversations/:id/messages", requireUser, async (req, res) => {
   try {
     const conversation = await pool.query("SELECT id FROM conversations WHERE id = $1 AND (customer_id = $2 OR professional_id = $2)", [req.params.id, res.locals.user.id]);
     if (!conversation.rows[0]) return jsonError(res, 404, "Conversa não encontrada.");
     const markedRead = await pool.query("UPDATE messages SET read_at = NOW() WHERE conversation_id = $1 AND sender_id <> $2 AND read_at IS NULL RETURNING id", [req.params.id, res.locals.user.id]);
     const result = await pool.query(
-      `SELECT m.id, m.sender_id, u.name AS sender_name, m.body, m.attachment_url, m.created_at, m.read_at
+      `SELECT m.id, m.sender_id, CASE WHEN u.role = 'admin' THEN 'Equipe ManiService' ELSE u.name END AS sender_name,
+        m.body, m.attachment_url, m.created_at, m.read_at
        FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id = $1 ORDER BY m.created_at ASC`, [req.params.id],
     );
     res.json({ messages: result.rows, markedRead: markedRead.rowCount || 0 });
@@ -762,7 +784,10 @@ app.post("/api/conversations/:id/messages", requireUser, async (req, res) => {
     );
     if (recipient.rows[0]) {
       const preferences = await pool.query("SELECT notify_messages FROM profiles WHERE user_id = $1", [recipient.rows[0].user_id]);
-      if (preferences.rows[0]?.notify_messages !== false) await notifyUser(recipient.rows[0].user_id, "message", "Nova mensagem", `${res.locals.user.name} enviou uma mensagem.`, `/mensagens?conversation=${result.rows[0].conversation_id}`);
+      if (preferences.rows[0]?.notify_messages !== false) {
+        const isAdminMessage = res.locals.user.role === "admin";
+        await notifyUser(recipient.rows[0].user_id, isAdminMessage ? "admin_message" : "message", isAdminMessage ? "Mensagem da Equipe ManiService" : "Nova mensagem", isAdminMessage ? "A equipe ManiService enviou uma mensagem." : `${res.locals.user.name} enviou uma mensagem.`, `/mensagens?conversation=${result.rows[0].conversation_id}`);
+      }
     }
     res.status(201).json({ message: result.rows[0] });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível enviar a mensagem."); }

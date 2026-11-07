@@ -29,7 +29,7 @@ export default function ParaPrestadores() {
   ];
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100">
       <SiteHeader />
 
       {/* Hero Section */}

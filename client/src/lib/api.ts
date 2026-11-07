@@ -27,6 +27,7 @@ export const api = {
   updateAdminReport: (id: number, status: string, reviewNote?: string) => request<{ report: Record<string, any> }>(`/api/admin/reports/${id}`, { method: "PATCH", body: JSON.stringify({ status, reviewNote }) }),
   adminUsers: (params = "") => request<{ users: Array<Record<string, any>>; total: number; offset: number; limit: number }>(`/api/admin/users${params ? `?${params}` : ""}`),
   adminUser: (id: number) => request<{ account: Record<string, any>; posts: Array<Record<string, any>>; reviews: Array<Record<string, any>> }>(`/api/admin/users/${id}`),
+  adminStartConversation: (id: number) => request<{ conversation: { id: number } }>(`/api/admin/users/${id}/conversation`, { method: "POST" }),
   feed: () => request<{ items: Array<Record<string, any>> }>("/api/feed"),
   searchUsers: (params = "") => request<{ users: Array<Record<string, any>> }>(`/api/users/search${params ? `?${params}` : ""}`),
   forgotPassword: (email: string) => request<{ ok: boolean }>("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),

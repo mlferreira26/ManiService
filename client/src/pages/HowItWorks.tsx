@@ -27,7 +27,7 @@ function Flow({ title, caption, steps, tone }: { title: string; caption: string;
 }
 
 export default function HowItWorks() {
-  return <div className="min-h-screen bg-slate-50"><SiteHeader />
+  return <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100"><SiteHeader />
     <main>
       <section className="relative isolate overflow-hidden border-b bg-gradient-to-br from-blue-50 via-white to-cyan-50">
         <div className="pointer-events-none absolute -right-24 -top-28 h-96 w-96 rounded-full bg-cyan-200/30 blur-3xl" />

@@ -65,7 +65,7 @@ export default function AccountSettings() {
     finally { setChangingPassword(false); }
   }
 
-  return <div className="min-h-screen bg-slate-50"><SiteHeader /><main className="container max-w-3xl space-y-6 py-8 md:py-12">
+  return <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100"><SiteHeader /><main className="container max-w-3xl space-y-6 py-8 md:py-12">
     <div><p className="text-sm font-semibold text-blue-700">Minha conta</p><h1 className="mt-1 text-3xl font-bold">Configurações</h1><p className="mt-2 text-muted-foreground">Controle sua privacidade, região, notificações e senha.</p></div>
     {loading || !settings ? <Card><CardContent className="p-8 text-center text-muted-foreground">Carregando configurações...</CardContent></Card> : <>
       <Card><CardHeader><CardTitle className="flex items-center gap-2"><UserRound className="h-5 w-5 text-primary" />Conta</CardTitle></CardHeader><CardContent className="space-y-4"><div className="grid gap-3 sm:grid-cols-2"><div><p className="text-xs text-muted-foreground">Nome</p><p className="font-medium">{settings.name}</p></div><div><p className="text-xs text-muted-foreground">E-mail</p><p className="break-all font-medium">{settings.email}</p></div></div><Link href="/perfil"><a><Button variant="outline">Editar dados do perfil</Button></a></Link></CardContent></Card>

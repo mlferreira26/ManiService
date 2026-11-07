@@ -40,7 +40,7 @@ export default function Account() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100">
       <SiteHeader />
       <main className="container py-10 md:py-16">
         <div className="mx-auto max-w-5xl">
