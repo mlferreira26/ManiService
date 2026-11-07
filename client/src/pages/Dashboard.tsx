@@ -53,7 +53,7 @@ export default function Dashboard() {
     finally { setDeletingRequestId(null); }
   }
 
-  const myRequests = requests.filter((item) => Number(item.user_id) === user?.id);
+  const myRequests = requests.filter((item) => Number(item.user_id) === Number(user?.id));
   const openRequests = myRequests.filter((item) => ["aberto", "em_analise"].includes(String(item.status)));
   const activeBookings = bookings.filter((item) => item.status !== "cancelado");
   const rating = professional && Number(profile.total_reviews) > 0 ? Number(profile.rating).toFixed(1).replace(".", ",") : "—";
