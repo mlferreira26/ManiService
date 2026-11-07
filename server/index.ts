@@ -253,6 +253,41 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar a lista de contas."); }
 });
 
+app.get("/api/admin/users/:id", requireAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  if (!Number.isInteger(userId) || userId < 1) return jsonError(res, 400, "Conta inválida.");
+  try {
+    const accountResult = await pool.query(
+      `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.last_login_at,
+        p.avatar_url, p.cover_url, p.bio, p.neighborhood, p.city, p.state, p.is_public,
+        pp.specialty, pp.description AS professional_description, pp.verified, pp.rating,
+        pp.total_reviews, pp.total_services,
+        (SELECT COUNT(*)::int FROM follows f WHERE f.following_id = u.id) AS followers_count,
+        (SELECT COUNT(*)::int FROM follows f WHERE f.follower_id = u.id) AS following_count
+       FROM users u
+       LEFT JOIN profiles p ON p.user_id = u.id
+       LEFT JOIN professional_profiles pp ON pp.user_id = u.id
+       WHERE u.id = $1`, [userId],
+    );
+    const account = accountResult.rows[0];
+    if (!account) return jsonError(res, 404, "Conta não encontrada.");
+    const [postsResult, reviewsResult] = await Promise.all([
+      pool.query(
+        `SELECT po.id, po.title, po.description, po.image_url, po.visibility, po.created_at,
+          (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
+          (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = po.id) AS comments_count
+         FROM posts po WHERE po.user_id = $1 ORDER BY po.created_at DESC LIMIT 50`, [userId],
+      ),
+      pool.query(
+        `SELECT r.id, r.rating, r.comment, r.created_at, u.name AS reviewer_name
+         FROM reviews r JOIN users u ON u.id = r.reviewer_id
+         WHERE r.professional_id = $1 ORDER BY r.created_at DESC LIMIT 50`, [userId],
+      ),
+    ]);
+    res.json({ account, posts: postsResult.rows, reviews: reviewsResult.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar o perfil da conta."); }
+});
+
 app.get("/api/health", async (_req, res) => {
   try {
     const result = await pool.query("SELECT NOW() AS now");

@@ -23,6 +23,7 @@ import AccountSettings from "./pages/AccountSettings";
 import ActivityFeed from "./pages/ActivityFeed";
 import AdminModeration from "./pages/AdminModeration";
 import AdminUsers from "./pages/AdminUsers";
+import AdminUserProfile from "./pages/AdminUserProfile";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -68,6 +69,7 @@ function Router() {
     <Route path="/servicos"><Guarded><ActivityFeed /></Guarded></Route>
     <Route path="/admin/denuncias"><Guarded><AdminModeration /></Guarded></Route>
     <Route path="/admin/pessoas"><Guarded><AdminUsers /></Guarded></Route>
+    <Route path="/admin/pessoas/:id"><Guarded><AdminUserProfile /></Guarded></Route>
     <Route path="/comunidades"><Guarded><Communities /></Guarded></Route>
     <Route path="/profissionais"><Guarded><Professionals /></Guarded></Route>
     <Route path="/404" component={NotFound} />
