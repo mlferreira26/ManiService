@@ -21,6 +21,7 @@ import ProfessionalProfile from "./pages/ProfessionalProfile";
 import Messages from "./pages/Messages";
 import AccountSettings from "./pages/AccountSettings";
 import ActivityFeed from "./pages/ActivityFeed";
+import AdminModeration from "./pages/AdminModeration";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -64,6 +65,7 @@ function Router() {
     <Route path="/mensagens"><Guarded><Messages /></Guarded></Route>
     <Route path="/configuracoes"><Guarded><AccountSettings /></Guarded></Route>
     <Route path="/servicos"><Guarded><ActivityFeed /></Guarded></Route>
+    <Route path="/admin/denuncias"><Guarded><AdminModeration /></Guarded></Route>
     <Route path="/comunidades"><Guarded><Communities /></Guarded></Route>
     <Route path="/profissionais"><Guarded><Professionals /></Guarded></Route>
     <Route path="/404" component={NotFound} />

@@ -292,16 +292,44 @@ CREATE TABLE IF NOT EXISTS reports (
   reported_user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
   post_id BIGINT REFERENCES posts(id) ON DELETE CASCADE,
   request_id BIGINT REFERENCES service_requests(id) ON DELETE CASCADE,
+  message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE,
   reason VARCHAR(120) NOT NULL,
   details TEXT,
   status VARCHAR(20) NOT NULL DEFAULT 'aberta'
     CHECK (status IN ('aberta', 'em_analise', 'resolvida', 'ignorada')),
+  reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TIMESTAMPTZ,
+  review_note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CHECK (reported_user_id IS NOT NULL OR post_id IS NOT NULL OR request_id IS NOT NULL)
+  CHECK (reported_user_id IS NOT NULL OR post_id IS NOT NULL OR request_id IS NOT NULL OR message_id IS NOT NULL)
+);
+
+-- Migração idempotente para bancos que já possuíam a tabela reports.
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_note TEXT;
+ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_check;
+ALTER TABLE reports ADD CONSTRAINT reports_check CHECK (
+  reported_user_id IS NOT NULL OR post_id IS NOT NULL OR request_id IS NOT NULL OR message_id IS NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS reports_status_created_idx
   ON reports (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS reports_message_idx ON reports (message_id) WHERE message_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS report_events (
+  id BIGSERIAL PRIMARY KEY,
+  report_id BIGINT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+  moderator_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  previous_status VARCHAR(20) NOT NULL,
+  new_status VARCHAR(20) NOT NULL CHECK (new_status IN ('em_analise', 'resolvida', 'ignorada')),
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS report_events_report_created_idx
+  ON report_events (report_id, created_at ASC);
 
 -- =========================================================
 -- Notificações e sessões

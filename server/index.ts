@@ -95,6 +95,13 @@ async function requireProfessional(req: Request, res: Response, next: NextFuncti
   });
 }
 
+async function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  await requireUser(req, res, () => {
+    if (res.locals.user.role !== "admin") return jsonError(res, 403, "Apenas a equipe de moderação pode acessar esta área.");
+    next();
+  });
+}
+
 async function notifyUser(userId: number | string, type: string, title: string, body: string, link: string) {
   await pool.query(
     `INSERT INTO notifications (user_id, type, title, body, link)
@@ -126,6 +133,102 @@ app.post("/api/notifications/read-all", requireUser, async (_req, res) => {
     await pool.query("UPDATE notifications SET read_at = NOW() WHERE user_id = $1 AND read_at IS NULL", [res.locals.user.id]);
     res.json({ ok: true });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar as notificações."); }
+});
+
+const reportReasons = ["Suspeita de golpe ou fraude", "Pedido de pagamento fora da plataforma", "Perfil ou identidade falsa", "Assédio, ameaça ou discriminação", "Spam ou anúncio enganoso", "Conteúdo impróprio", "Outro"];
+app.post("/api/reports", requireUser, async (req, res) => {
+  const targetType = String(req.body?.targetType || "");
+  const targetId = Number(req.body?.targetId);
+  const reason = String(req.body?.reason || "");
+  const details = String(req.body?.details || "").trim();
+  if (!["profile", "post", "request", "message"].includes(targetType) || !Number.isInteger(targetId) || targetId < 1 || !reportReasons.includes(reason)) return jsonError(res, 400, "Selecione o item e o motivo da denúncia.");
+  if (details.length > 2000) return jsonError(res, 400, "Os detalhes devem ter até 2.000 caracteres.");
+  try {
+    let targetUserId: number | null = null;
+    if (targetType === "profile") {
+      const target = await pool.query("SELECT id FROM users WHERE id = $1 AND is_active = TRUE", [targetId]);
+      if (!target.rows[0] || targetId === Number(res.locals.user.id)) return jsonError(res, 404, "Perfil indisponível para denúncia.");
+      targetUserId = targetId;
+    } else if (targetType === "post") {
+      const target = await pool.query("SELECT po.user_id FROM posts po JOIN profiles p ON p.user_id = po.user_id WHERE po.id = $1 AND (po.visibility = 'publico' AND p.is_public = TRUE OR po.user_id = $2)", [targetId, res.locals.user.id]);
+      if (!target.rows[0] || Number(target.rows[0].user_id) === Number(res.locals.user.id)) return jsonError(res, 404, "Publicação indisponível para denúncia.");
+      targetUserId = target.rows[0].user_id;
+    } else if (targetType === "request") {
+      const target = await pool.query("SELECT user_id FROM service_requests WHERE id = $1 AND status IN ('aberto', 'em_analise')", [targetId]);
+      if (!target.rows[0] || Number(target.rows[0].user_id) === Number(res.locals.user.id)) return jsonError(res, 404, "Pedido indisponível para denúncia.");
+      targetUserId = target.rows[0].user_id;
+    } else {
+      const target = await pool.query("SELECT sender_id FROM messages WHERE id = $1 AND sender_id <> $2 AND conversation_id IN (SELECT id FROM conversations WHERE customer_id = $2 OR professional_id = $2)", [targetId, res.locals.user.id]);
+      if (!target.rows[0]) return jsonError(res, 404, "Mensagem indisponível para denúncia.");
+      targetUserId = target.rows[0].sender_id;
+    }
+    const existing = await pool.query(
+      `SELECT id FROM reports WHERE reporter_id = $1 AND status IN ('aberta','em_analise')
+       AND reported_user_id IS NOT DISTINCT FROM $2 AND post_id IS NOT DISTINCT FROM $3
+       AND request_id IS NOT DISTINCT FROM $4 AND message_id IS NOT DISTINCT FROM $5 LIMIT 1`,
+      [res.locals.user.id, targetType === "profile" || targetType === "message" ? targetUserId : null, targetType === "post" ? targetId : null, targetType === "request" ? targetId : null, targetType === "message" ? targetId : null],
+    );
+    if (existing.rows[0]) return res.status(409).json({ error: "Você já enviou uma denúncia sobre este item. A equipe está analisando." });
+    await pool.query(
+      `INSERT INTO reports (reporter_id, reported_user_id, post_id, request_id, message_id, reason, details)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [res.locals.user.id, targetType === "profile" || targetType === "message" ? targetUserId : null, targetType === "post" ? targetId : null, targetType === "request" ? targetId : null, targetType === "message" ? targetId : null, reason, details || null],
+    );
+    res.status(201).json({ ok: true, message: "Denúncia recebida. A equipe do ManiService fará a análise com confidencialidade." });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível registrar a denúncia agora."); }
+});
+
+app.get("/api/admin/reports", requireAdmin, async (req, res) => {
+  const status = String(req.query.status || "todas");
+  if (!['todas', 'aberta', 'em_analise', 'resolvida', 'ignorada'].includes(status)) return jsonError(res, 400, "Filtro de status inválido.");
+  try {
+    const result = await pool.query(
+      `SELECT r.id, r.reason, r.details, r.status, r.created_at, r.reviewed_at, r.review_note,
+        reporter.name AS reporter_name, subject.name AS reported_user_name,
+        p.title AS post_title, p.description AS post_description,
+        sr.title AS request_title, sr.description AS request_description,
+        m.body AS message_body, m.attachment_url AS message_attachment_url,
+        reviewer.name AS reviewer_name,
+        COALESCE((SELECT json_agg(json_build_object(
+          'previous_status', event.previous_status, 'status', event.new_status,
+          'moderator_name', moderator.name, 'note', event.note, 'created_at', event.created_at
+        ) ORDER BY event.created_at ASC)
+        FROM report_events event JOIN users moderator ON moderator.id = event.moderator_id
+        WHERE event.report_id = r.id), '[]'::json) AS events
+       FROM reports r JOIN users reporter ON reporter.id = r.reporter_id
+       LEFT JOIN users subject ON subject.id = r.reported_user_id
+       LEFT JOIN posts p ON p.id = r.post_id LEFT JOIN service_requests sr ON sr.id = r.request_id
+       LEFT JOIN messages m ON m.id = r.message_id LEFT JOIN users reviewer ON reviewer.id = r.reviewed_by
+       WHERE ($1 = 'todas' OR r.status = $1) ORDER BY CASE r.status WHEN 'aberta' THEN 0 WHEN 'em_analise' THEN 1 ELSE 2 END, r.created_at ASC LIMIT 200`, [status],
+    );
+    res.json({ reports: result.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar as denúncias."); }
+});
+
+app.patch("/api/admin/reports/:id", requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const status = String(req.body?.status || "");
+  const reviewNote = String(req.body?.reviewNote || "").trim();
+  if (!Number.isInteger(id) || id < 1 || !["em_analise", "resolvida", "ignorada"].includes(status)) return jsonError(res, 400, "Atualização de denúncia inválida.");
+  if (reviewNote.length > 2000) return jsonError(res, 400, "A anotação deve ter até 2.000 caracteres.");
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+    const current = await client.query("SELECT status FROM reports WHERE id = $1 FOR UPDATE", [id]);
+    if (!current.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 404, "Denúncia não encontrada."); }
+    const result = await client.query(
+      `UPDATE reports SET status = $2, review_note = $3, reviewed_by = $4, reviewed_at = NOW()
+       WHERE id = $1 RETURNING id, status, review_note, reviewed_at`, [id, status, reviewNote || null, res.locals.user.id],
+    );
+    await client.query(
+      `INSERT INTO report_events (report_id, moderator_id, previous_status, new_status, note)
+       VALUES ($1, $2, $3, $4, $5)`, [id, res.locals.user.id, current.rows[0].status, status, reviewNote || null],
+    );
+    await client.query("COMMIT");
+    res.json({ report: result.rows[0] });
+  } catch (error) { if (client) await client.query("ROLLBACK").catch(() => undefined); console.error(error); jsonError(res, 500, "Não foi possível atualizar a denúncia."); }
+  finally { client?.release(); }
 });
 
 app.get("/api/health", async (_req, res) => {
@@ -1068,8 +1171,25 @@ async function ensureRuntimeSchema() {
     ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
     ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;
+    ALTER TABLE reports ADD COLUMN IF NOT EXISTS message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE;
+    ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
+    ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+    ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_note TEXT;
+    ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_check;
+    ALTER TABLE reports ADD CONSTRAINT reports_check CHECK (reported_user_id IS NOT NULL OR post_id IS NOT NULL OR request_id IS NOT NULL OR message_id IS NOT NULL);
+    CREATE TABLE IF NOT EXISTS report_events (
+      id BIGSERIAL PRIMARY KEY,
+      report_id BIGINT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+      moderator_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      previous_status VARCHAR(20) NOT NULL,
+      new_status VARCHAR(20) NOT NULL CHECK (new_status IN ('em_analise','resolvida','ignorada')),
+      note TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS report_events_report_created_idx ON report_events (report_id, created_at ASC);
     CREATE INDEX IF NOT EXISTS profiles_location_idx ON profiles (latitude, longitude);
     CREATE INDEX IF NOT EXISTS notifications_unread_idx ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
+    CREATE INDEX IF NOT EXISTS reports_message_idx ON reports (message_id) WHERE message_id IS NOT NULL;
   `);
 }
 
