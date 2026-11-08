@@ -14,19 +14,19 @@ type FeedItem = { kind: "publicacao" | "pedido"; id: number; title: string; desc
 type FeaturedProfessional = { id: number; name: string; specialty?: string | null; city?: string | null; state?: string | null; avatar_url?: string | null; verified?: boolean; rating?: number; total_reviews?: number; total_services?: number };
 const dateLabel = (date: string) => new Date(date).toLocaleString("pt-BR", { dateStyle: "medium", timeStyle: "short" });
 const initials = (name: string) => name.split(" ").filter(Boolean).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
-const isCompletedWork = (item: FeedItem) => item.kind === "publicacao" && item.title.toLocaleLowerCase("pt-BR").startsWith("serviço concluído:");
-
 export default function ActivityFeed() {
   const [items, setItems] = useState<FeedItem[]>([]);
   const [professionals, setProfessionals] = useState<FeaturedProfessional[]>([]);
+  const [completedWorks, setCompletedWorks] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let active = true;
-    Promise.all([api.feed(), api.searchUsers("role=profissional")])
-      .then(([{ items: feed }, { users }]) => {
+    Promise.all([api.feed(), api.searchUsers("role=profissional"), api.completedWork()])
+      .then(([{ items: feed }, { users }, { items: work }]) => {
         if (!active) return;
         setItems(feed as FeedItem[]);
         setProfessionals((users as FeaturedProfessional[]).slice(0, 4));
+        setCompletedWorks(work as FeedItem[]);
       })
       .catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível carregar a Comunidade."))
       .finally(() => { if (active) setLoading(false); });
@@ -34,9 +34,6 @@ export default function ActivityFeed() {
   }, []);
 
   const requests = useMemo(() => items.filter((item) => item.kind === "pedido").slice(0, 5), [items]);
-  const featuredProfessionalIds = useMemo(() => new Set(professionals.map((professional) => Number(professional.id))), [professionals]);
-  const completedWorks = useMemo(() => items.filter((item) => isCompletedWork(item) && item.image_url && featuredProfessionalIds.has(Number(item.author_id))).slice(0, 5), [featuredProfessionalIds, items]);
-
   async function react(item: FeedItem) {
     try {
       const result = await api.reactToPost(item.id);

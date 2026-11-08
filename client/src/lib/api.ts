@@ -12,7 +12,7 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string; city: string; state?: string }) => request<{ user: { id: number; name: string; email: string; role: string } }>("/api/auth/register", { method: "POST", body: JSON.stringify(payload) }),
+  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string; city: string; state: string }) => request<{ user: { id: number; name: string; email: string; role: string } }>("/api/auth/register", { method: "POST", body: JSON.stringify(payload) }),
   login: (payload: { email: string; password: string }) => request<{ user: { id: number; name: string; email: string; role: string; isModerationBlocked?: boolean; moderationBlockedUntil?: string | null; moderationBlockReason?: string | null } }>("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   me: () => request<{ user: { id: number; name: string; email: string; role: string; isModerationBlocked?: boolean; moderationBlockedUntil?: string | null; moderationBlockReason?: string | null } }>("/api/auth/me"),
@@ -38,6 +38,7 @@ export const api = {
   reviewIdentityVerification: (id: number, status: "verificada" | "ajuste_solicitado", note = "") => request<{ ok: boolean; status: string }>(`/api/admin/users/${id}/identity-verification`, { method: "PATCH", body: JSON.stringify({ status, note }) }),
   adminStartConversation: (id: number) => request<{ conversation: { id: number } }>(`/api/admin/users/${id}/conversation`, { method: "POST" }),
   feed: () => request<{ items: Array<Record<string, any>> }>("/api/feed"),
+  completedWork: () => request<{ items: Array<Record<string, any>> }>("/api/feed/completed-work"),
   searchUsers: (params = "") => request<{ users: Array<Record<string, any>> }>(`/api/users/search${params ? `?${params}` : ""}`),
   forgotPassword: (email: string) => request<{ ok: boolean }>("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
   resetPassword: (token: string, password: string) => request<{ ok: boolean }>("/api/auth/reset-password", { method: "POST", body: JSON.stringify({ token, password }) }),

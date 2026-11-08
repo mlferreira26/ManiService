@@ -5,7 +5,7 @@ export type AuthUser = { id: number; name: string; email: string; role: string; 
 type AuthContextValue = {
   user: AuthUser | null;
   loading: boolean;
-  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string }) => Promise<AuthUser>;
+  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string; city: string; state: string }) => Promise<AuthUser>;
   login: (payload: { email: string; password: string }) => Promise<AuthUser>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;

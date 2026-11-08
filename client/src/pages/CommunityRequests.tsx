@@ -45,7 +45,7 @@ export default function CommunityRequests() {
   useEffect(() => { void loadRequests(); }, []);
 
   const filtered = useMemo(() => {
-    const visible = requests.filter((item) => item.status !== "cancelado");
+    const visible = requests.filter((item) => item.status === "aberto");
     return category === "Todas" ? visible : visible.filter((item) => item.category.toLowerCase() === category.toLowerCase());
   }, [category, requests]);
 

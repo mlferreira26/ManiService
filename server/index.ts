@@ -554,8 +554,8 @@ app.post("/api/auth/register", async (req, res) => {
   const { name, email, password, role, specialty } = req.body || {};
   const city = String(req.body?.city || "").trim();
   const state = String(req.body?.state || "").trim().toUpperCase();
-  if (!name || !email || !password || !city || !["usuario", "profissional"].includes(role)) return jsonError(res, 400, "Nome, e-mail, senha, cidade e perfil são obrigatórios.");
-  if (city.length > 100 || (state && !/^[A-Z]{2}$/.test(state))) return jsonError(res, 400, "Confira a cidade e a sigla do estado.");
+  if (!name || !email || !password || !city || !state || !["usuario", "profissional"].includes(role)) return jsonError(res, 400, "Nome, e-mail, senha, cidade, UF e perfil são obrigatórios.");
+  if (city.length > 100 || !/^[A-Z]{2}$/.test(state)) return jsonError(res, 400, "Confira a cidade e informe uma UF válida com duas letras.");
   if (String(password).length < 8) return jsonError(res, 400, "A senha precisa ter pelo menos 8 caracteres.");
   const normalizedEmail = String(email).trim().toLowerCase();
   let client;
@@ -797,13 +797,39 @@ app.get("/api/feed", requireUser, async (_req, res) => {
            sr.created_at, u.id AS author_id, u.name AS author_name, u.role AS author_role,
            p.avatar_url, sr.city, sr.state, 0::int AS likes_count, 0::int AS comments_count, FALSE AS liked_by_me
          FROM service_requests sr JOIN users u ON u.id = sr.user_id JOIN profiles p ON p.user_id = u.id
-         WHERE sr.status IN ('aberto', 'em_analise') AND p.is_public = TRUE AND u.is_active = TRUE
+         WHERE sr.status = 'aberto' AND p.is_public = TRUE AND u.is_active = TRUE
            AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
        ) activity ORDER BY created_at DESC LIMIT 60`,
       [res.locals.user.id],
     );
     res.json({ items: result.rows });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar as atividades."); }
+});
+
+app.get("/api/feed/completed-work", requireUser, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM (
+         SELECT DISTINCT ON (po.id) 'publicacao'::text AS kind, po.id,
+           COALESCE(sr.title, po.title) AS title, po.description, po.image_url, po.created_at,
+           u.id AS author_id, u.name AS author_name, u.role AS author_role,
+           p.avatar_url, p.city, p.state
+         FROM posts po
+         JOIN users u ON u.id = po.user_id
+         JOIN profiles p ON p.user_id = u.id
+         LEFT JOIN bookings b ON b.professional_id = u.id AND b.completion_image_url = po.image_url AND b.status = 'concluido'
+         LEFT JOIN service_requests sr ON sr.id = b.request_id
+         WHERE po.visibility = 'publico' AND po.image_url IS NOT NULL
+           AND po.moderation_removed_at IS NULL AND p.is_public = TRUE AND u.is_active = TRUE
+           AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+           AND (po.title ILIKE 'Serviço concluído:%' OR b.id IS NOT NULL)
+         ORDER BY po.id, po.created_at DESC
+       ) completed
+       ORDER BY created_at DESC
+       LIMIT 10`,
+    );
+    res.json({ items: result.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar os serviços concluídos."); }
 });
 
 app.get("/api/users/search", requireUser, async (req, res) => {
@@ -1225,7 +1251,7 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
         u.identity_verified,
         p.avatar_url, p.cover_url, p.bio, p.neighborhood, p.city, p.state,
         p.is_public,
-        pp.specialty, pp.description AS professional_description, pp.verified,
+        pp.specialty, pp.description AS professional_description, pp.service_radius_km, pp.hourly_rate, pp.verified,
         COALESCE((SELECT ROUND(AVG(r.rating)::numeric, 1) FROM reviews r WHERE r.professional_id = u.id), pp.rating, 0) AS rating,
         (SELECT COUNT(*)::int FROM reviews r WHERE r.professional_id = u.id) AS total_reviews,
         pp.total_services,
