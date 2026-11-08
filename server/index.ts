@@ -4,7 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { Pool, type PoolClient } from "pg";
 import dotenv from "dotenv";
-import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
@@ -33,6 +33,41 @@ app.use(express.urlencoded({ extended: true }));
 
 function jsonError(res: Response, status: number, error: string) {
   return res.status(status).json({ error });
+}
+
+function identityEncryptionKey() {
+  const configured = process.env.IDENTITY_DATA_KEY?.trim();
+  if (!configured || !/^[a-f\d]{64}$/i.test(configured)) {
+    throw new Error("Configure IDENTITY_DATA_KEY com 64 caracteres hexadecimais no ambiente do servidor.");
+  }
+  return Buffer.from(configured, "hex");
+}
+
+function encryptIdentityData(value: { cpf: string; birthDate: string }) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", identityEncryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
+  return `${iv.toString("base64")}.${cipher.getAuthTag().toString("base64")}.${encrypted.toString("base64")}`;
+}
+
+function decryptIdentityData(value: string): { cpf: string; birthDate: string } {
+  const [ivValue, tagValue, encryptedValue] = value.split(".");
+  if (!ivValue || !tagValue || !encryptedValue) throw new Error("Dados de verificação inválidos.");
+  const decipher = createDecipheriv("aes-256-gcm", identityEncryptionKey(), Buffer.from(ivValue, "base64"));
+  decipher.setAuthTag(Buffer.from(tagValue, "base64"));
+  const decrypted = Buffer.concat([decipher.update(Buffer.from(encryptedValue, "base64")), decipher.final()]).toString("utf8");
+  return JSON.parse(decrypted) as { cpf: string; birthDate: string };
+}
+
+function isValidCpf(value: string) {
+  const digits = value.replace(/\D/g, "");
+  if (!/^\d{11}$/.test(digits) || /^(\d)\1{10}$/.test(digits)) return false;
+  const checkDigit = (length: number) => {
+    const sum = digits.slice(0, length).split("").reduce((total, digit, index) => total + Number(digit) * (length + 1 - index), 0);
+    const remainder = (sum * 10) % 11;
+    return remainder === 10 ? 0 : remainder;
+  };
+  return checkDigit(9) === Number(digits[9]) && checkDigit(10) === Number(digits[10]);
 }
 
 function getCookie(req: Request, name: string) {
@@ -435,6 +470,7 @@ app.get("/api/admin/users/:id", requireAdmin, async (req, res) => {
     const accountResult = await pool.query(
       `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.last_login_at,
         p.avatar_url, p.cover_url, p.bio, p.neighborhood, p.city, p.state, p.is_public,
+        u.identity_verified,
         pp.specialty, pp.description AS professional_description, pp.verified, pp.rating,
         pp.total_reviews, pp.total_services,
         (SELECT COUNT(*)::int FROM follows f WHERE f.following_id = u.id) AS followers_count,
@@ -446,7 +482,7 @@ app.get("/api/admin/users/:id", requireAdmin, async (req, res) => {
     );
     const account = accountResult.rows[0];
     if (!account) return jsonError(res, 404, "Conta não encontrada.");
-    const [postsResult, reviewsResult] = await Promise.all([
+    const [postsResult, reviewsResult, verificationResult] = await Promise.all([
       pool.query(
         `SELECT po.id, po.title, po.description, po.image_url, po.visibility, po.created_at,
           (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
@@ -458,9 +494,50 @@ app.get("/api/admin/users/:id", requireAdmin, async (req, res) => {
          FROM reviews r JOIN users u ON u.id = r.reviewer_id
          WHERE r.professional_id = $1 ORDER BY r.created_at DESC LIMIT 50`, [userId],
       ),
+      pool.query(
+        `SELECT id, status, encrypted_data, admin_note, submitted_at, reviewed_at
+         FROM identity_verification_requests WHERE user_id = $1 ORDER BY submitted_at DESC LIMIT 1`, [userId],
+      ),
     ]);
-    res.json({ account, posts: postsResult.rows, reviews: reviewsResult.rows });
+    const verification = verificationResult.rows[0] || null;
+    let identityVerification: Record<string, unknown> | null = verification ? { id: verification.id, status: verification.status, admin_note: verification.admin_note, submitted_at: verification.submitted_at, reviewed_at: verification.reviewed_at } : null;
+    if (verification && verification.status === "pendente") {
+      try { identityVerification = { ...identityVerification, ...decryptIdentityData(String(verification.encrypted_data)) }; }
+      catch (error) { console.error("Falha ao descriptografar dados da verificação de identidade.", error); return jsonError(res, 503, "Não foi possível abrir os dados da verificação. Confira a chave IDENTITY_DATA_KEY do servidor."); }
+    }
+    res.json({ account, posts: postsResult.rows, reviews: reviewsResult.rows, identityVerification });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar o perfil da conta."); }
+});
+
+app.patch("/api/admin/users/:id/identity-verification", requireAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  const status = String(req.body?.status || "");
+  const note = String(req.body?.note || "").trim();
+  if (!Number.isInteger(userId) || userId < 1 || !["verificada", "ajuste_solicitado"].includes(status)) return jsonError(res, 400, "Ação de verificação inválida.");
+  if (status === "ajuste_solicitado" && note.length < 5) return jsonError(res, 400, "Explique o que a pessoa precisa corrigir (mínimo de 5 caracteres).");
+  if (note.length > 1000) return jsonError(res, 400, "A observação deve ter no máximo 1.000 caracteres.");
+  try {
+    const client = await pool.connect();
+    let verificationId: number;
+    try {
+      await client.query("BEGIN");
+      const latest = await client.query("SELECT id FROM identity_verification_requests WHERE user_id = $1 AND status = 'pendente' ORDER BY submitted_at DESC LIMIT 1 FOR UPDATE", [userId]);
+      if (!latest.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 409, "Não há uma solicitação pendente para revisar."); }
+      verificationId = Number(latest.rows[0].id);
+      await client.query(
+        `UPDATE identity_verification_requests SET status = $2, admin_note = $3,
+         reviewed_by = $4, reviewed_at = NOW() WHERE id = $1`,
+        [verificationId, status, note || null, res.locals.user.id],
+      );
+      if (status === "verificada") await client.query("UPDATE users SET identity_verified = TRUE WHERE id = $1", [userId]);
+      else await client.query("UPDATE users SET identity_verified = FALSE WHERE id = $1", [userId]);
+      const message = status === "verificada" ? "A equipe conferiu os dados enviados e aprovou sua verificação." : `A equipe pediu ajustes nos dados de verificação: ${note}`;
+      await client.query("INSERT INTO notifications (user_id, type, title, body, link) VALUES ($1, 'verificacao_identidade', $2, $3, '/perfil')", [userId, status === "verificada" ? "Perfil verificado" : "Ajuste na verificação", message]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    res.json({ ok: true, status });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar a verificação."); }
 });
 
 app.get("/api/health", async (_req, res) => {
@@ -584,10 +661,44 @@ app.put("/api/account/settings", requireUser, async (req, res) => {
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível salvar as configurações."); }
 });
 
+app.get("/api/account/identity-verification", requireUser, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT status, admin_note, submitted_at, reviewed_at FROM identity_verification_requests
+       WHERE user_id = $1 ORDER BY submitted_at DESC LIMIT 1`, [res.locals.user.id],
+    );
+    res.json({ request: result.rows[0] || null });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível consultar a verificação."); }
+});
+
+app.post("/api/account/identity-verification", requireUser, async (req, res) => {
+  const cpf = String(req.body?.cpf || "").replace(/\D/g, "");
+  const birthDate = String(req.body?.birthDate || "");
+  if (!isValidCpf(cpf)) return jsonError(res, 400, "Informe um CPF válido.");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate) || Number.isNaN(Date.parse(`${birthDate}T00:00:00Z`)) || new Date(`${birthDate}T00:00:00Z`).toISOString().slice(0, 10) !== birthDate || new Date(`${birthDate}T00:00:00Z`).getTime() > Date.now()) return jsonError(res, 400, "Informe uma data de nascimento válida.");
+  let encryptedData: string;
+  try { encryptedData = encryptIdentityData({ cpf, birthDate }); }
+  catch (error) { console.error("A chave de criptografia da verificação de identidade não está configurada.", error); return jsonError(res, 503, "A verificação ainda não está configurada no servidor. Tente novamente mais tarde."); }
+  try {
+    const current = await pool.query("SELECT status FROM identity_verification_requests WHERE user_id = $1 ORDER BY submitted_at DESC LIMIT 1", [res.locals.user.id]);
+    if (current.rows[0]?.status === "pendente") return jsonError(res, 409, "Sua verificação já está aguardando análise.");
+    if (current.rows[0]?.status === "verificada") return jsonError(res, 409, "Sua identidade já foi verificada.");
+    const result = await pool.query(
+      `INSERT INTO identity_verification_requests (user_id, encrypted_data) VALUES ($1, $2)
+       RETURNING status, admin_note, submitted_at, reviewed_at`, [res.locals.user.id, encryptedData],
+    );
+    await pool.query(
+      "INSERT INTO notifications (user_id, type, title, body, link) SELECT id, 'verificacao_identidade', 'Verificação de perfil pendente', $1, '/admin/pessoas' FROM users WHERE role = 'admin' AND is_active = TRUE",
+      [`${res.locals.user.name} enviou dados para verificação do perfil.`],
+    );
+    res.status(201).json({ request: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível enviar os dados para análise."); }
+});
+
 app.get("/api/profile", requireUser, async (_req, res) => {
   try {
     const result = await pool.query(
-      `SELECT u.id, u.name, u.email, u.role, u.phone, p.bio, p.address_line,
+      `SELECT u.id, u.name, u.email, u.role, u.phone, u.identity_verified, p.bio, p.address_line,
         p.neighborhood, p.city, p.state, p.postal_code, p.avatar_url, p.cover_url,
         p.is_public, p.search_radius_km, p.latitude, p.longitude, p.notify_messages, p.notify_local_requests,
         (SELECT COUNT(*)::int FROM follows f WHERE f.following_id = u.id) AS followers_count,
@@ -1108,6 +1219,7 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
   try {
     const profileResult = await pool.query(
       `SELECT u.id, u.name, CASE WHEN u.role = 'admin' THEN 'usuario' ELSE u.role END AS role,
+        u.identity_verified,
         p.avatar_url, p.cover_url, p.bio, p.neighborhood, p.city, p.state,
         p.is_public,
         pp.specialty, pp.description AS professional_description, pp.verified,
@@ -1424,17 +1536,36 @@ app.post("/api/bookings/:id/complete", requireUser, async (req, res) => {
   try {
     await client.query("BEGIN");
     const result = await client.query("UPDATE bookings SET status = 'aguardando_confirmacao', final_amount = $3, completion_image_url = $4, professional_completed_at = NOW(), updated_at = NOW() WHERE id = $1 AND professional_id = $2 AND status = 'em_execucao' RETURNING *", [bookingId, res.locals.user.id, finalAmount, completionImageUrl]);
-    if (!result.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 409, "Inicie o serviço antes de marcá-lo como concluído."); }
-    const amountText = `Valor final proposto: R$ ${finalAmount.toFixed(2).replace(".", ",")}.`;
-    await addBookingChatEvent(client, result.rows[0], res.locals.user.id, `O profissional marcou o serviço como concluído. ${amountText} Confira o acompanhamento e confirme ou informe um problema.`, completionImageUrl);
+    if (!result.rows[0]) {
+      await client.query("ROLLBACK");
+      const current = await pool.query("SELECT status FROM bookings WHERE id = $1 AND professional_id = $2", [bookingId, res.locals.user.id]);
+      if (!current.rows[0]) return jsonError(res, 404, "Este serviço não foi encontrado para sua conta.");
+      if (current.rows[0].status === "aguardando_confirmacao") {
+        const existing = await pool.query("SELECT * FROM bookings WHERE id = $1", [bookingId]);
+        return res.json({ booking: existing.rows[0], alreadyCompleted: true });
+      }
+      if (current.rows[0].status === "agendado") return jsonError(res, 409, "Inicie o serviço antes de marcá-lo como concluído.");
+      return jsonError(res, 409, `Este serviço não pode ser concluído agora (status: ${current.rows[0].status}). Atualize a página e confira o acompanhamento.`);
+    }
+    const booking = result.rows[0];
     await client.query("COMMIT");
-    await notifyUser(result.rows[0].customer_id, "servico_concluido", "Confirme a conclusão", "O profissional marcou o serviço como concluído. Confira e confirme ou informe um problema.", "/servicos/acompanhar").catch(() => undefined);
-    res.json({ booking: result.rows[0] });
+    const amountText = `Valor final proposto: R$ ${finalAmount.toFixed(2).replace(".", ",")}.`;
+    try {
+      await addBookingChatEvent(client, booking, res.locals.user.id, `O profissional marcou o serviço como concluído. ${amountText} Confira o acompanhamento e confirme ou informe um problema.`, completionImageUrl);
+    } catch (chatError) {
+      console.error("Serviço concluído, mas não foi possível registrar a mensagem no chat:", chatError);
+    }
+    await notifyUser(booking.customer_id, "servico_concluido", "Confirme a conclusão", "O profissional marcou o serviço como concluído. Confira e confirme ou informe um problema.", "/servicos/acompanhar").catch(() => undefined);
+    res.json({ booking });
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     console.error("Não foi possível marcar o serviço como concluído:", error);
-    if ((error as { code?: string }).code === "23514") {
+    const code = (error as { code?: string }).code;
+    if (code === "23514") {
       return jsonError(res, 503, "O banco ainda não permite a etapa de confirmação do cliente. Atualize a migração de acompanhamento no Supabase e tente novamente.");
+    }
+    if (code === "42703" || code === "42P01") {
+      return jsonError(res, 503, "O banco está sem uma coluna ou tabela necessária para concluir serviços. Atualize a migração de acompanhamento no Supabase.");
     }
     jsonError(res, 500, "Não foi possível concluir o serviço.");
   } finally { client.release(); }
@@ -1753,6 +1884,25 @@ async function ensureRuntimeSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_blocked_until TIMESTAMPTZ;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_block_reason TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_action_note TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS identity_verified BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE TABLE IF NOT EXISTS identity_verification_requests (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      encrypted_data TEXT NOT NULL,
+      status VARCHAR(24) NOT NULL DEFAULT 'pendente' CHECK (status IN ('pendente','verificada','ajuste_solicitado')),
+      admin_note TEXT,
+      reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reviewed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS identity_verification_user_submitted_idx ON identity_verification_requests (user_id, submitted_at DESC);
+    CREATE INDEX IF NOT EXISTS identity_verification_pending_idx ON identity_verification_requests (submitted_at ASC) WHERE status = 'pendente';
+    ALTER TABLE identity_verification_requests ENABLE ROW LEVEL SECURITY;
+    REVOKE ALL ON TABLE identity_verification_requests FROM PUBLIC;
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE ALL ON TABLE identity_verification_requests FROM anon; END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE ALL ON TABLE identity_verification_requests FROM authenticated; END IF;
+    END $$;
     ALTER TABLE posts ADD COLUMN IF NOT EXISTS moderation_removed_at TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS account_appeals (
       id BIGSERIAL PRIMARY KEY,

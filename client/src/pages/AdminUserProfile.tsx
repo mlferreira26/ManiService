@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
-type Detail = { account: Record<string, any>; posts: Array<Record<string, any>>; reviews: Array<Record<string, any>> };
+type Detail = { account: Record<string, any>; posts: Array<Record<string, any>>; reviews: Array<Record<string, any>>; identityVerification: Record<string, any> | null };
 const roleLabel: Record<string, string> = { usuario: "Consumidor", profissional: "Profissional", admin: "Administrador" };
 const dateLabel = (value?: string | null) => value ? new Date(value).toLocaleString("pt-BR", { dateStyle: "medium", timeStyle: "short" }) : "Nunca";
 const initials = (value?: string) => (value || "?").trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
@@ -21,6 +21,8 @@ export default function AdminUserProfile() {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
   const [startingChat, setStartingChat] = useState(false);
+  const [reviewingIdentity, setReviewingIdentity] = useState(false);
+  const [identityNote, setIdentityNote] = useState("");
 
   useEffect(() => {
     const id = Number(params?.id);
@@ -40,6 +42,18 @@ export default function AdminUserProfile() {
     catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível iniciar o contato."); }
     finally { setStartingChat(false); }
   }
+  async function reviewIdentity(status: "verificada" | "ajuste_solicitado") {
+    if (!account || reviewingIdentity) return;
+    setReviewingIdentity(true);
+    try {
+      await api.reviewIdentityVerification(Number(account.id), status, identityNote);
+      const refreshed = await api.adminUser(Number(account.id));
+      setDetail(refreshed);
+      setIdentityNote("");
+      toast.success(status === "verificada" ? "Identidade aprovada. O selo público foi ativado." : "Correção solicitada à pessoa.");
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível revisar a identidade."); }
+    finally { setReviewingIdentity(false); }
+  }
   return <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100"><SiteHeader /><main className="container max-w-5xl space-y-6 py-8 md:py-10">
     <Button asChild variant="ghost" className="-ml-3"><Link href="/admin/pessoas"><ArrowLeft className="mr-2 h-4 w-4" />Voltar para pessoas</Link></Button>
     {user?.role !== "admin" ? <Card><CardContent className="p-8 text-center">Esta área é exclusiva da administração do ManiService.</CardContent></Card> : loading ? <Card><CardContent className="p-10 text-center text-muted-foreground">Carregando perfil...</CardContent></Card> : !account ? <Card><CardContent className="p-10 text-center">Não foi possível encontrar esta conta.</CardContent></Card> : <>
@@ -56,6 +70,7 @@ export default function AdminUserProfile() {
           <div className="mt-5 flex flex-wrap items-center gap-3 text-sm"><span className="rounded-lg bg-slate-50 px-3 py-2"><Users className="mr-1 inline h-4 w-4 text-primary" />{account.followers_count || 0} seguidores · {account.following_count || 0} seguindo</span>{account.role === "profissional" && <span className="rounded-lg bg-slate-50 px-3 py-2"><Star className="mr-1 inline h-4 w-4 text-amber-500" />{Number(account.rating || 0).toFixed(1)} · {account.total_reviews || 0} avaliações · {account.total_services || 0} serviços</span>}{account.is_active && Number(account.id) !== Number(user?.id) && <Button size="sm" onClick={() => void contactAccount()} disabled={startingChat}><MessageCircle className="mr-2 h-4 w-4" />{startingChat ? "Abrindo conversa..." : "Contatar pela equipe"}</Button>}</div>
         </CardContent>
       </Card>
+      <section><div className="mb-3"><h2 className="text-xl font-bold">Verificação de identidade</h2><p className="text-sm text-muted-foreground">CPF e data de nascimento são privados e aparecem nesta ficha somente para administradores.</p></div><Card><CardContent className="space-y-4 p-5">{!detail.identityVerification ? <p className="text-sm text-muted-foreground">Esta pessoa ainda não enviou dados para verificação.</p> : <><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{detail.identityVerification.status === "pendente" ? "Em análise" : detail.identityVerification.status === "verificada" ? "Verificada" : "Correção solicitada"}</Badge><span className="text-xs text-muted-foreground">Enviada em {dateLabel(detail.identityVerification.submitted_at)}</span></div>{detail.identityVerification.cpf && <div className="grid gap-3 sm:grid-cols-2"><div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-muted-foreground">CPF informado</p><p className="mt-1 font-medium">{String(detail.identityVerification.cpf).replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-muted-foreground">Data de nascimento</p><p className="mt-1 font-medium">{new Date(`${detail.identityVerification.birthDate}T00:00:00`).toLocaleDateString("pt-BR")}</p></div></div>}{detail.identityVerification.admin_note && <p className="rounded-lg bg-amber-50 p-3 text-sm">Observação: {detail.identityVerification.admin_note}</p>}{detail.identityVerification.status === "pendente" && <><div className="space-y-2"><label htmlFor="identity-review-note" className="text-sm font-medium">Observação (obrigatória para pedir correção)</label><textarea id="identity-review-note" value={identityNote} onChange={(event) => setIdentityNote(event.target.value)} maxLength={1000} rows={3} className="w-full rounded-md border bg-background px-3 py-2 text-sm" placeholder="Explique o que precisa ser corrigido" /></div><div className="flex flex-wrap gap-2"><Button disabled={reviewingIdentity} onClick={() => void reviewIdentity("verificada")}><ShieldCheck className="mr-2 h-4 w-4" />Aprovar verificação</Button><Button variant="outline" disabled={reviewingIdentity || identityNote.trim().length < 5} onClick={() => void reviewIdentity("ajuste_solicitado")}>{reviewingIdentity ? "Salvando..." : "Solicitar correção"}</Button></div></>}</>}</CardContent></Card></section>
       <section><div className="mb-3"><h2 className="text-xl font-bold">Publicações</h2><p className="text-sm text-muted-foreground">Visíveis nesta ficha administrativa, incluindo publicações privadas.</p></div>{detail.posts.length ? <div className="space-y-3">{detail.posts.map((post) => <Card key={post.id}><CardContent className="p-5">{post.image_url && <img src={post.image_url} alt="Imagem da publicação" className="mb-4 max-h-80 w-full rounded-lg object-cover" />}<div className="flex flex-wrap items-start justify-between gap-2"><h3 className="font-semibold">{post.title}</h3><Badge variant="outline">{post.visibility}</Badge></div><p className="mt-2 whitespace-pre-wrap text-sm leading-6">{post.description}</p><p className="mt-3 text-xs text-muted-foreground">{dateLabel(post.created_at)} · {post.likes_count} reações · {post.comments_count} comentários</p></CardContent></Card>)}</div> : <Card><CardContent className="p-5 text-sm text-muted-foreground">Esta conta ainda não tem publicações.</CardContent></Card>}</section>
       <section><div className="mb-3"><h2 className="text-xl font-bold">Avaliações recebidas</h2></div>{detail.reviews.length ? <div className="space-y-3">{detail.reviews.map((review) => <Card key={review.id}><CardContent className="p-4"><div className="flex items-center justify-between gap-3"><p className="font-medium">{review.reviewer_name}</p><span className="inline-flex items-center gap-1 text-sm"><Star className="h-4 w-4 fill-amber-400 text-amber-500" />{review.rating}/5</span></div>{review.comment && <p className="mt-2 text-sm text-muted-foreground">{review.comment}</p>}<p className="mt-2 text-xs text-muted-foreground">{dateLabel(review.created_at)}</p></CardContent></Card>)}</div> : <Card><CardContent className="p-5 text-sm text-muted-foreground"><MessageSquareText className="mr-2 inline h-4 w-4" />Esta conta ainda não recebeu avaliações.</CardContent></Card>}</section>
     </>}

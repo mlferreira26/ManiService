@@ -34,7 +34,8 @@ export const api = {
   adminServiceIssues: (status = "todas") => request<{ issues: Array<Record<string, any>> }>(`/api/admin/service-issues?status=${encodeURIComponent(status)}`),
   updateAdminServiceIssue: (id: number, status: string, reviewNote?: string) => request<{ issue: Record<string, any> }>(`/api/admin/service-issues/${id}`, { method: "PATCH", body: JSON.stringify({ status, reviewNote }) }),
   adminUsers: (params = "") => request<{ users: Array<Record<string, any>>; total: number; offset: number; limit: number }>(`/api/admin/users${params ? `?${params}` : ""}`),
-  adminUser: (id: number) => request<{ account: Record<string, any>; posts: Array<Record<string, any>>; reviews: Array<Record<string, any>> }>(`/api/admin/users/${id}`),
+  adminUser: (id: number) => request<{ account: Record<string, any>; posts: Array<Record<string, any>>; reviews: Array<Record<string, any>>; identityVerification: Record<string, any> | null }>(`/api/admin/users/${id}`),
+  reviewIdentityVerification: (id: number, status: "verificada" | "ajuste_solicitado", note = "") => request<{ ok: boolean; status: string }>(`/api/admin/users/${id}/identity-verification`, { method: "PATCH", body: JSON.stringify({ status, note }) }),
   adminStartConversation: (id: number) => request<{ conversation: { id: number } }>(`/api/admin/users/${id}/conversation`, { method: "POST" }),
   feed: () => request<{ items: Array<Record<string, any>> }>("/api/feed"),
   searchUsers: (params = "") => request<{ users: Array<Record<string, any>> }>(`/api/users/search${params ? `?${params}` : ""}`),
@@ -61,6 +62,8 @@ export const api = {
   createReview: (payload: { professionalId?: number; userId?: number; bookingId?: number; requestId?: number; rating: number; comment?: string }) => request<{ review: unknown }>("/api/reviews", { method: "POST", body: JSON.stringify(payload) }),
   profile: () => request<{ profile: Record<string, any> }>("/api/profile"),
   updateProfile: (payload: Record<string, unknown>) => request<{ profile: Record<string, any> }>("/api/profile", { method: "PUT", body: JSON.stringify(payload) }),
+  identityVerification: () => request<{ request: Record<string, any> | null }>("/api/account/identity-verification"),
+  submitIdentityVerification: (cpf: string, birthDate: string) => request<{ request: Record<string, any> }>("/api/account/identity-verification", { method: "POST", body: JSON.stringify({ cpf, birthDate }) }),
   uploadImage: async (file: File) => {
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
