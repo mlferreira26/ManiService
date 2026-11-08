@@ -734,8 +734,13 @@ app.put("/api/profile", requireUser, async (req, res) => {
       await client.query("UPDATE users SET name = $2, phone = $3 WHERE id = $1", [res.locals.user.id, String(name).trim(), phone || null]);
       await client.query(
         `UPDATE profiles SET bio = $2, address_line = $3, neighborhood = $4, city = $5,
-         state = $6, postal_code = $7, avatar_url = $8 WHERE user_id = $1`,
-        [res.locals.user.id, bio || null, addressLine || null, neighborhood || null, city || null, state || null, postalCode || null, avatarUrl || null],
+         state = $6, postal_code = $7, avatar_url = $8,
+         latitude = CASE WHEN LOWER(BTRIM(COALESCE(city, ''))) <> LOWER(BTRIM(COALESCE($5, '')))
+                              OR LOWER(BTRIM(COALESCE(state, ''))) <> LOWER(BTRIM(COALESCE($6, ''))) THEN NULL ELSE latitude END,
+         longitude = CASE WHEN LOWER(BTRIM(COALESCE(city, ''))) <> LOWER(BTRIM(COALESCE($5, '')))
+                               OR LOWER(BTRIM(COALESCE(state, ''))) <> LOWER(BTRIM(COALESCE($6, ''))) THEN NULL ELSE longitude END
+         WHERE user_id = $1`,
+        [res.locals.user.id, bio || null, addressLine || null, neighborhood || null, String(city || "").trim() || null, String(state || "").trim().toUpperCase() || null, postalCode || null, avatarUrl || null],
       );
       if (res.locals.user.role === "profissional") {
         await client.query(
@@ -862,13 +867,14 @@ app.get("/api/users/search", requireUser, async (req, res) => {
          AND ($4 = '' OR p.city ILIKE '%' || $4 || '%')
          AND (
            (v.latitude IS NOT NULL AND v.longitude IS NOT NULL AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+             AND BTRIM(COALESCE(p.state, '')) <> ''
+             AND LOWER(BTRIM(COALESCE(p.state, ''))) = LOWER(BTRIM(COALESCE(v.state, '')))
              AND 6371 * 2 * ASIN(SQRT(LEAST(1, GREATEST(0,
                POWER(SIN(RADIANS(p.latitude-v.latitude)/2), 2) + COS(RADIANS(v.latitude))*COS(RADIANS(p.latitude))*POWER(SIN(RADIANS(p.longitude-v.longitude)/2), 2)
              )))) <= CASE WHEN $5 > 0 THEN $5 ELSE v.search_radius_km END)
            OR ((v.latitude IS NULL OR v.longitude IS NULL OR p.latitude IS NULL OR p.longitude IS NULL)
-             AND LOWER(COALESCE(p.city,'')) = LOWER(COALESCE(v.city,''))
-             AND LOWER(COALESCE(p.state,'')) = LOWER(COALESCE(v.state,'')) AND COALESCE(p.city,'') <> '')
-           OR ($4 <> '' AND p.city ILIKE '%' || $4 || '%')
+             AND LOWER(BTRIM(COALESCE(p.city,''))) = LOWER(BTRIM(COALESCE(v.city,'')))
+             AND LOWER(BTRIM(COALESCE(p.state,''))) = LOWER(BTRIM(COALESCE(v.state,''))) AND COALESCE(BTRIM(p.city),'') <> '')
          )
        ORDER BY (u.role = 'profissional') DESC, pp.verified DESC NULLS LAST, pp.rating DESC NULLS LAST, u.name ASC LIMIT 100`,
       [res.locals.user.id, search, role, city, Number.isInteger(requestedRadius) ? requestedRadius : 0],
