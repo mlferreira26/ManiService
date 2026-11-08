@@ -314,8 +314,8 @@ app.patch("/api/admin/reports/:id", requireAdmin, async (req, res) => {
     if (!current.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 404, "Denúncia não encontrada."); }
     if (current.rows[0].is_archived) { await client.query("ROLLBACK"); return jsonError(res, 409, "Restaure a denúncia para a fila ativa antes de alterar sua análise."); }
     const result = await client.query(
-      `UPDATE reports SET status = $2, review_note = $3, reviewed_by = $4, reviewed_at = NOW(),
-        is_archived = ($2 IN ('resolvida', 'ignorada'))
+      `UPDATE reports SET status = $2::varchar(20), review_note = $3, reviewed_by = $4, reviewed_at = NOW(),
+        is_archived = ($2::varchar(20) IN ('resolvida'::varchar(20), 'ignorada'::varchar(20)))
        WHERE id = $1 RETURNING id, status, review_note, reviewed_at`, [id, status, reviewNote || null, res.locals.user.id],
     );
     await client.query(

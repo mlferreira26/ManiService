@@ -38,6 +38,10 @@ export default function AdminUserProfile() {
   }, [params?.id, user?.role]);
 
   const account = detail?.account;
+  const moderationBlocked = Boolean(
+    account?.moderation_blocked_at &&
+    (!account.moderation_blocked_until || new Date(account.moderation_blocked_until).getTime() > Date.now())
+  );
   async function contactAccount() {
     if (!account || startingChat) return;
     setStartingChat(true);
@@ -77,7 +81,7 @@ export default function AdminUserProfile() {
         <CardContent className="relative p-5 sm:p-7">
           <div className="-mt-14 flex flex-col gap-4 sm:-mt-16 sm:flex-row sm:items-end">
             {account.avatar_url ? <img src={account.avatar_url} alt="" className="h-24 w-24 rounded-2xl border-4 border-white bg-white object-cover shadow sm:h-28 sm:w-28" /> : <div className="grid h-24 w-24 place-items-center rounded-2xl border-4 border-white bg-blue-600 text-2xl font-bold text-white shadow sm:h-28 sm:w-28">{initials(account.name)}</div>}
-            <div className="min-w-0 flex-1 pb-1"><div className="flex flex-wrap items-center gap-2"><h1 className="text-2xl font-bold">{account.name}</h1><Badge variant="secondary">{roleLabel[account.role] || account.role}</Badge><Badge className={account.is_active ? "bg-green-100 text-green-800 hover:bg-green-100" : "bg-slate-200 text-slate-700 hover:bg-slate-200"}>{account.is_active ? "Ativa" : "Inativa"}</Badge></div><p className="mt-1 break-all text-sm text-muted-foreground">{account.email}</p></div>
+            <div className="min-w-0 flex-1 pb-1"><div className="flex flex-wrap items-center gap-2"><h1 className="text-2xl font-bold">{account.name}</h1><Badge variant="secondary">{roleLabel[account.role] || account.role}</Badge><Badge className={moderationBlocked ? "bg-red-100 text-red-800 hover:bg-red-100" : account.is_active ? "bg-green-100 text-green-800 hover:bg-green-100" : "bg-slate-200 text-slate-700 hover:bg-slate-200"}>{moderationBlocked ? "Bloqueada no ManiService" : account.is_active ? "Ativa" : "Inativa"}</Badge></div><p className="mt-1 break-all text-sm text-muted-foreground">{account.email}</p></div>
           </div>
           <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted-foreground"><span className="inline-flex items-center gap-1.5">{account.is_public ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}{account.is_public ? "Perfil público" : "Perfil privado"}</span>{(account.city || account.state) && <span className="inline-flex items-center gap-1.5"><MapPin className="h-4 w-4" />{[account.city, account.state].filter(Boolean).join(", ")}</span>}<span>Cadastro: {dateLabel(account.created_at)}</span><span>Último acesso: {dateLabel(account.last_login_at)}</span></div>
           {account.bio && <p className="mt-5 whitespace-pre-wrap text-sm leading-6">{account.bio}</p>}
@@ -85,7 +89,7 @@ export default function AdminUserProfile() {
           <div className="mt-5 flex flex-wrap items-center gap-3 text-sm"><span className="rounded-lg bg-slate-50 px-3 py-2"><Users className="mr-1 inline h-4 w-4 text-primary" />{account.followers_count || 0} seguidores · {account.following_count || 0} seguindo</span>{account.role === "profissional" && <span className="rounded-lg bg-slate-50 px-3 py-2"><Star className="mr-1 inline h-4 w-4 text-amber-500" />{Number(account.rating || 0).toFixed(1)} · {account.total_reviews || 0} avaliações · {account.total_services || 0} serviços</span>}{account.is_active && Number(account.id) !== Number(user?.id) && <Button size="sm" onClick={() => void contactAccount()} disabled={startingChat}><MessageCircle className="mr-2 h-4 w-4" />{startingChat ? "Abrindo conversa..." : "Contatar pela equipe"}</Button>}</div>
           {Number(account.id) !== Number(user?.id) && <div className="mt-5 rounded-xl border border-red-200 bg-red-50/70 p-4">
             <div className="flex items-start gap-2"><ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-red-700" /><div><h2 className="font-semibold text-red-900">Denunciar e bloquear conta</h2><p className="mt-1 text-sm text-red-800">Registra um caso para análise, bloqueia o acesso e encerra as sessões ativas. A pessoa poderá enviar um recurso.</p></div></div>
-            {account.moderation_blocked_at && <p className="mt-3 text-sm font-medium text-red-900">Conta bloqueada{account.moderation_blocked_until ? ` até ${dateLabel(account.moderation_blocked_until)}` : " sem prazo definido"}.</p>}
+            {moderationBlocked && <p className="mt-3 text-sm font-medium text-red-900">Bloqueada no ManiService{account.moderation_blocked_until ? ` até ${dateLabel(account.moderation_blocked_until)}` : " sem prazo definido"}.</p>}
             <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)]">
               <label className="space-y-1 text-sm font-medium">Motivo da denúncia<select value={reportReason} onChange={(event) => setReportReason(event.target.value)} className="h-10 w-full rounded-md border bg-white px-3"><option>Suspeita de golpe ou fraude</option><option>Pedido de pagamento fora da plataforma</option><option>Perfil ou identidade falsa</option><option>Assédio, ameaça ou discriminação</option><option>Spam ou anúncio enganoso</option><option>Conteúdo impróprio</option><option>Outro</option></select></label>
               <label className="space-y-1 text-sm font-medium">Descreva a evidência<textarea value={reportDetails} onChange={(event) => setReportDetails(event.target.value)} maxLength={2000} rows={3} className="w-full rounded-md border bg-white px-3 py-2" placeholder="Explique o que encontrou no perfil ou por que a conta deve ser revisada." /></label>
