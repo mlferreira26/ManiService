@@ -61,14 +61,17 @@ async function verifyPassword(password: string, stored: string) {
 }
 
 function safeUser(row: Record<string, unknown>) {
-  return { id: row.id, name: row.name, email: row.email, role: row.role };
+  const blockedUntil = row.moderation_blocked_until as string | null | undefined;
+  const blockedAt = row.moderation_blocked_at as string | null | undefined;
+  const isBlocked = Boolean(blockedAt && (!blockedUntil || new Date(blockedUntil).getTime() > Date.now()));
+  return { id: row.id, name: row.name, email: row.email, role: row.role, isModerationBlocked: isBlocked, moderationBlockedUntil: blockedUntil || null, moderationBlockReason: isBlocked ? row.moderation_block_reason || null : null };
 }
 
 async function getCurrentUser(req: Request) {
   const sessionId = getCookie(req, sessionCookieName);
   if (!sessionId) return null;
   const result = await pool.query(
-    `SELECT u.id, u.name, u.email, u.role
+    `SELECT u.id, u.name, u.email, u.role, u.moderation_blocked_at, u.moderation_blocked_until, u.moderation_block_reason
      FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.id = $1 AND s.expires_at > NOW() AND u.is_active = TRUE`,
     [sessionId],
@@ -81,6 +84,11 @@ async function requireUser(req: Request, res: Response, next: NextFunction) {
     const user = await getCurrentUser(req);
     if (!user) return jsonError(res, 401, "Você precisa estar conectado.");
     res.locals.user = user;
+    const blockedUntil = user.moderation_blocked_until as string | null;
+    const isBlocked = Boolean(user.moderation_blocked_at && (!blockedUntil || new Date(blockedUntil).getTime() > Date.now()));
+    if (isBlocked && req.path !== "/api/auth/me" && req.path !== "/api/account/appeal" && req.path !== "/api/account/appeal/status") {
+      return res.status(423).json({ error: "Sua conta está temporariamente restrita enquanto a equipe analisa uma denúncia.", code: "ACCOUNT_BLOCKED" });
+    }
     next();
   } catch (error) {
     console.error(error);
@@ -230,13 +238,15 @@ app.post("/api/reports", requireUser, async (req, res) => {
 
 app.get("/api/admin/reports", requireAdmin, async (req, res) => {
   const status = String(req.query.status || "todas");
+  const archived = req.query.archived === "true";
   if (!['todas', 'aberta', 'em_analise', 'resolvida', 'ignorada'].includes(status)) return jsonError(res, 400, "Filtro de status inválido.");
   try {
     const result = await pool.query(
       `SELECT r.id, r.reason, r.details, r.status, r.created_at, r.reviewed_at, r.review_note,
+        r.reported_user_id, r.post_id, r.is_archived, subject.moderation_hidden_until, subject.moderation_blocked_at, subject.moderation_blocked_until,
         reporter.name AS reporter_name, subject.name AS reported_user_name,
-        p.title AS post_title, p.description AS post_description,
-        sr.title AS request_title, sr.description AS request_description,
+        p.title AS post_title, p.description AS post_description, p.image_url AS post_image_url, p.moderation_removed_at AS post_removed_at,
+        sr.title AS request_title, sr.description AS request_description, sr.image_url AS request_image_url, sr.image_urls AS request_image_urls,
         m.body AS message_body, m.attachment_url AS message_attachment_url,
         reviewer.name AS reviewer_name,
         COALESCE((SELECT json_agg(json_build_object(
@@ -249,7 +259,7 @@ app.get("/api/admin/reports", requireAdmin, async (req, res) => {
        LEFT JOIN users subject ON subject.id = r.reported_user_id
        LEFT JOIN posts p ON p.id = r.post_id LEFT JOIN service_requests sr ON sr.id = r.request_id
        LEFT JOIN messages m ON m.id = r.message_id LEFT JOIN users reviewer ON reviewer.id = r.reviewed_by
-       WHERE ($1 = 'todas' OR r.status = $1) ORDER BY CASE r.status WHEN 'aberta' THEN 0 WHEN 'em_analise' THEN 1 ELSE 2 END, r.created_at ASC LIMIT 200`, [status],
+       WHERE r.is_archived = $2 AND ($1 = 'todas' OR r.status = $1) ORDER BY CASE r.status WHEN 'aberta' THEN 0 WHEN 'em_analise' THEN 1 ELSE 2 END, r.created_at ASC LIMIT 200`, [status, archived],
     );
     res.json({ reports: result.rows });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar as denúncias."); }
@@ -265,10 +275,12 @@ app.patch("/api/admin/reports/:id", requireAdmin, async (req, res) => {
   try {
     client = await pool.connect();
     await client.query("BEGIN");
-    const current = await client.query("SELECT status FROM reports WHERE id = $1 FOR UPDATE", [id]);
+    const current = await client.query("SELECT status, is_archived FROM reports WHERE id = $1 FOR UPDATE", [id]);
     if (!current.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 404, "Denúncia não encontrada."); }
+    if (current.rows[0].is_archived) { await client.query("ROLLBACK"); return jsonError(res, 409, "Restaure a denúncia para a fila ativa antes de alterar sua análise."); }
     const result = await client.query(
-      `UPDATE reports SET status = $2, review_note = $3, reviewed_by = $4, reviewed_at = NOW()
+      `UPDATE reports SET status = $2, review_note = $3, reviewed_by = $4, reviewed_at = NOW(),
+        is_archived = ($2 IN ('resolvida', 'ignorada'))
        WHERE id = $1 RETURNING id, status, review_note, reviewed_at`, [id, status, reviewNote || null, res.locals.user.id],
     );
     await client.query(
@@ -279,6 +291,119 @@ app.patch("/api/admin/reports/:id", requireAdmin, async (req, res) => {
     res.json({ report: result.rows[0] });
   } catch (error) { if (client) await client.query("ROLLBACK").catch(() => undefined); console.error(error); jsonError(res, 500, "Não foi possível atualizar a denúncia."); }
   finally { client?.release(); }
+});
+
+app.patch("/api/admin/reports/:id/archive", requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const archived = req.body?.archived === true;
+  if (!Number.isInteger(id) || id < 1) return jsonError(res, 400, "Denúncia inválida.");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const current = await client.query("SELECT status, is_archived FROM reports WHERE id = $1 FOR UPDATE", [id]);
+    if (!current.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 404, "Denúncia não encontrada."); }
+    if (archived && !["resolvida", "ignorada"].includes(current.rows[0].status)) { await client.query("ROLLBACK"); return jsonError(res, 409, "Conclua a análise antes de arquivar a denúncia."); }
+    if (Boolean(current.rows[0].is_archived) !== archived) {
+      await client.query("UPDATE reports SET is_archived = $2, reviewed_by = $3, reviewed_at = NOW() WHERE id = $1", [id, archived, res.locals.user.id]);
+      await client.query(
+        `INSERT INTO report_events (report_id, moderator_id, previous_status, new_status, note)
+         VALUES ($1, $2, $3, $3, $4)`,
+        [id, res.locals.user.id, current.rows[0].status, archived ? "Denúncia arquivada após análise." : "Denúncia restaurada à fila ativa."],
+      );
+    }
+    await client.query("COMMIT");
+    res.json({ ok: true, archived });
+  } catch (error) { await client.query("ROLLBACK").catch(() => undefined); console.error(error); jsonError(res, 500, "Não foi possível arquivar a denúncia."); }
+  finally { client.release(); }
+});
+
+app.post("/api/admin/reports/:id/action", requireAdmin, async (req, res) => {
+  const reportId = Number(req.params.id);
+  const action = String(req.body?.action || "");
+  const note = String(req.body?.note || "").trim().slice(0, 2000);
+  const days = Number(req.body?.days || 0);
+  if (!Number.isInteger(reportId) || reportId < 1 || !["remove_post", "hide_user", "block_user", "unblock_user"].includes(action)) return jsonError(res, 400, "Ação de moderação inválida.");
+  if ((action === "hide_user" || action === "block_user") && (!Number.isInteger(days) || days < 0 || days > 3650)) return jsonError(res, 400, "Informe uma duração válida em dias; 0 mantém a restrição sem prazo.");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query("SELECT id, reported_user_id, post_id, status, is_archived FROM reports WHERE id = $1 FOR UPDATE", [reportId]);
+    const report = result.rows[0];
+    if (!report) { await client.query("ROLLBACK"); return jsonError(res, 404, "Denúncia não encontrada."); }
+    if (report.is_archived) { await client.query("ROLLBACK"); return jsonError(res, 409, "Restaure a denúncia antes de aplicar novas ações de moderação."); }
+    if (action === "remove_post") {
+      if (!report.post_id) { await client.query("ROLLBACK"); return jsonError(res, 400, "Esta denúncia não se refere a uma publicação."); }
+      const removed = await client.query("UPDATE posts SET moderation_removed_at = COALESCE(moderation_removed_at, NOW()) WHERE id = $1 RETURNING id", [report.post_id]);
+      if (!removed.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 404, "A publicação não foi encontrada."); }
+    } else {
+      if (!report.reported_user_id) { await client.query("ROLLBACK"); return jsonError(res, 400, "Esta denúncia não identifica uma conta para moderar."); }
+      if (Number(report.reported_user_id) === Number(res.locals.user.id)) { await client.query("ROLLBACK"); return jsonError(res, 400, "Não é permitido aplicar essa ação à sua própria conta."); }
+      if (action === "hide_user") {
+        await client.query("UPDATE users SET moderation_hidden_until = NOW() + make_interval(days => $2::int), moderation_action_note = $3 WHERE id = $1", [report.reported_user_id, days || 36500, note || "Ocultação preventiva aplicada pela moderação."]);
+      } else if (action === "block_user") {
+        await client.query("UPDATE users SET moderation_blocked_at = NOW(), moderation_blocked_until = CASE WHEN $2::int = 0 THEN NULL ELSE NOW() + make_interval(days => $2::int) END, moderation_block_reason = $3, moderation_action_note = $3 WHERE id = $1", [report.reported_user_id, days, note || "Acesso restrito enquanto a equipe analisa a denúncia."]);
+        await client.query("DELETE FROM sessions WHERE user_id = $1", [report.reported_user_id]);
+      } else {
+        await client.query("UPDATE users SET moderation_blocked_at = NULL, moderation_blocked_until = NULL, moderation_block_reason = NULL, moderation_hidden_until = NULL, moderation_action_note = $2 WHERE id = $1", [report.reported_user_id, note || "Restrições removidas pela moderação."]);
+      }
+      const notificationText = action === "hide_user" ? "Seu perfil ficará oculto da descoberta pública durante uma revisão da equipe." : action === "block_user" ? "O acesso à sua conta foi restrito. Entre para enviar um recurso e acompanhar a revisão da equipe." : "A equipe removeu as restrições da sua conta. Você já pode voltar a usar o ManiService.";
+      await client.query("INSERT INTO notifications (user_id, type, title, body, link) VALUES ($1, 'moderacao_conta', 'Atualização da equipe ManiService', $2, $3)", [report.reported_user_id, notificationText, action === "block_user" ? "/conta-bloqueada" : "/servicos"]);
+    }
+    const actionText = action === "remove_post" ? "Publicação removida da exibição pública." : action === "hide_user" ? `Perfil ocultado por ${days || "prazo indeterminado"} dia(s).` : action === "block_user" ? `Conta bloqueada ${days ? `por ${days} dia(s)` : "sem prazo definido"}.` : "Restrições de bloqueio/ocultação removidas.";
+    const eventNote = [actionText, note].filter(Boolean).join(" ");
+    await client.query("INSERT INTO report_events (report_id, moderator_id, previous_status, new_status, note) VALUES ($1, $2, $3, $3, $4)", [reportId, res.locals.user.id, report.status, eventNote]);
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (error) { await client.query("ROLLBACK").catch(() => undefined); console.error(error); jsonError(res, 500, "Não foi possível aplicar a ação de moderação."); }
+  finally { client.release(); }
+});
+
+app.get("/api/admin/account-appeals", requireAdmin, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.id, a.user_id, a.message, a.status, a.admin_note, a.created_at, a.reviewed_at,
+        u.name AS user_name, u.email AS user_email
+       FROM account_appeals a JOIN users u ON u.id = a.user_id
+       ORDER BY CASE a.status WHEN 'aberta' THEN 0 ELSE 1 END, a.created_at ASC LIMIT 200`,
+    );
+    res.json({ appeals: result.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar os recursos de conta."); }
+});
+
+app.patch("/api/admin/account-appeals/:id", requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const status = String(req.body?.status || "");
+  const adminNote = String(req.body?.adminNote || "").trim();
+  if (!Number.isInteger(id) || id < 1 || !["em_analise", "resolvida", "negada"].includes(status) || adminNote.length > 2000) return jsonError(res, 400, "Atualização do recurso inválida.");
+  try {
+    const result = await pool.query(
+      `UPDATE account_appeals SET status = $2, admin_note = $3, reviewed_by = $4, reviewed_at = NOW()
+       WHERE id = $1 RETURNING user_id, status`, [id, status, adminNote || null, res.locals.user.id],
+    );
+    if (!result.rows[0]) return jsonError(res, 404, "Recurso não encontrado.");
+    if (status === "resolvida") await pool.query("UPDATE users SET moderation_blocked_at = NULL, moderation_blocked_until = NULL, moderation_block_reason = NULL, moderation_hidden_until = NULL WHERE id = $1", [result.rows[0].user_id]);
+    await notifyUser(result.rows[0].user_id, "recurso_conta", "Atualização do recurso da conta", adminNote || `O status do recurso foi atualizado para ${status.replaceAll("_", " ")}.`, status === "resolvida" ? "/servicos" : "/conta-bloqueada").catch(() => undefined);
+    res.json({ ok: true });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar o recurso."); }
+});
+
+app.get("/api/account/appeal/status", requireUser, async (_req, res) => {
+  try {
+    const result = await pool.query("SELECT id, message, status, admin_note, created_at, reviewed_at FROM account_appeals WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", [res.locals.user.id]);
+    res.json({ appeal: result.rows[0] || null });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível consultar seu recurso."); }
+});
+
+app.post("/api/account/appeal", requireUser, async (req, res) => {
+  const message = String(req.body?.message || "").trim();
+  if (message.length < 10 || message.length > 3000) return jsonError(res, 400, "Explique o motivo do recurso em 10 a 3.000 caracteres.");
+  try {
+    const pending = await pool.query("SELECT id FROM account_appeals WHERE user_id = $1 AND status IN ('aberta','em_analise') LIMIT 1", [res.locals.user.id]);
+    if (pending.rows[0]) return jsonError(res, 409, "Você já tem um recurso aguardando análise.");
+    const result = await pool.query("INSERT INTO account_appeals (user_id, message) VALUES ($1, $2) RETURNING id, status, created_at", [res.locals.user.id, message]);
+    await pool.query("INSERT INTO notifications (user_id, type, title, body, link) SELECT id, 'recurso_conta', 'Novo recurso de conta', $1, '/admin/denuncias?tab=recursos' FROM users WHERE role = 'admin' AND is_active = TRUE", [`${res.locals.user.name} enviou um recurso de conta.`]);
+    res.status(201).json({ appeal: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível enviar seu recurso."); }
 });
 
 app.get("/api/admin/users", requireAdmin, async (req, res) => {
@@ -390,7 +515,7 @@ app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return jsonError(res, 400, "Informe e-mail e senha.");
   try {
-    const result = await pool.query("SELECT id, name, email, password_hash, role FROM users WHERE LOWER(email) = LOWER($1) AND is_active = TRUE", [String(email).trim()]);
+    const result = await pool.query("SELECT id, name, email, password_hash, role, moderation_blocked_at, moderation_blocked_until, moderation_block_reason FROM users WHERE LOWER(email) = LOWER($1) AND is_active = TRUE", [String(email).trim()]);
     const user = result.rows[0];
     if (!user || !(await verifyPassword(String(password), user.password_hash))) return jsonError(res, 401, "E-mail ou senha inválidos.");
     const previousSessionId = getCookie(req, sessionCookieName);
@@ -551,13 +676,15 @@ app.get("/api/feed", requireUser, async (_req, res) => {
            (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = po.id) AS comments_count,
            EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $1) AS liked_by_me
          FROM posts po JOIN users u ON u.id = po.user_id JOIN profiles p ON p.user_id = u.id
-         WHERE po.visibility = 'publico' AND p.is_public = TRUE AND u.is_active = TRUE
+         WHERE po.visibility = 'publico' AND po.moderation_removed_at IS NULL AND p.is_public = TRUE AND u.is_active = TRUE
+           AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
          UNION ALL
          SELECT 'pedido'::text AS kind, sr.id, sr.title, sr.description, sr.image_url,
            sr.created_at, u.id AS author_id, u.name AS author_name, u.role AS author_role,
            p.avatar_url, sr.city, sr.state, 0::int AS likes_count, 0::int AS comments_count, FALSE AS liked_by_me
          FROM service_requests sr JOIN users u ON u.id = sr.user_id JOIN profiles p ON p.user_id = u.id
          WHERE sr.status IN ('aberto', 'em_analise') AND p.is_public = TRUE AND u.is_active = TRUE
+           AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
        ) activity ORDER BY created_at DESC LIMIT 60`,
       [res.locals.user.id],
     );
@@ -589,6 +716,7 @@ app.get("/api/users/search", requireUser, async (req, res) => {
        FROM users u JOIN profiles p ON p.user_id = u.id CROSS JOIN viewer v
        LEFT JOIN professional_profiles pp ON pp.user_id = u.id
        WHERE u.is_active = TRUE AND p.is_public = TRUE AND u.id <> $1
+         AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
          AND ($2 = '' OR u.name ILIKE '%' || $2 || '%' OR COALESCE(pp.specialty, '') ILIKE '%' || $2 || '%')
          AND ($3 = 'todos' OR ($3 = 'usuario' AND u.role IN ('usuario', 'admin')) OR ($3 = 'profissional' AND u.role = 'profissional'))
          AND ($4 = '' OR p.city ILIKE '%' || $4 || '%')
@@ -648,7 +776,7 @@ app.post("/api/posts/:id/reaction", requireUser, async (req, res) => {
   try {
     const removed = await pool.query(
       `DELETE FROM post_likes pl USING posts po, profiles p
-       WHERE pl.post_id = $1 AND pl.user_id = $2 AND po.id = pl.post_id AND p.user_id = po.user_id
+       WHERE pl.post_id = $1 AND pl.user_id = $2 AND po.id = pl.post_id AND po.moderation_removed_at IS NULL AND p.user_id = po.user_id
        RETURNING pl.post_id`,
       [postId, res.locals.user.id],
     );
@@ -657,7 +785,7 @@ app.post("/api/posts/:id/reaction", requireUser, async (req, res) => {
       const added = await pool.query(
         `INSERT INTO post_likes (post_id, user_id)
          SELECT po.id, $2 FROM posts po JOIN profiles p ON p.user_id = po.user_id
-         WHERE po.id = $1 AND po.visibility = 'publico' AND p.is_public = TRUE
+         WHERE po.id = $1 AND po.visibility = 'publico' AND po.moderation_removed_at IS NULL AND p.is_public = TRUE
          ON CONFLICT DO NOTHING RETURNING post_id`,
         [postId, res.locals.user.id],
       );
@@ -677,7 +805,7 @@ app.get("/api/posts/:id/comments", requireUser, async (req, res) => {
   try {
     const post = await pool.query(
       `SELECT po.id FROM posts po JOIN profiles p ON p.user_id = po.user_id
-       WHERE po.id = $1 AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))`,
+       WHERE po.id = $1 AND po.moderation_removed_at IS NULL AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))`,
       [postId, res.locals.user.id],
     );
     if (!post.rows[0]) return jsonError(res, 404, "Publicação não encontrada ou indisponível.");
@@ -701,7 +829,7 @@ app.post("/api/posts/:id/comments", requireUser, async (req, res) => {
     const result = await pool.query(
       `INSERT INTO post_comments (post_id, user_id, body)
        SELECT po.id, $2, $3 FROM posts po JOIN profiles p ON p.user_id = po.user_id
-       WHERE po.id = $1 AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))
+       WHERE po.id = $1 AND po.moderation_removed_at IS NULL AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))
        RETURNING id, post_id, user_id, body, created_at`,
       [postId, res.locals.user.id, body],
     );
@@ -929,6 +1057,7 @@ app.get("/api/service-requests", async (_req, res) => {
        JOIN users u ON u.id = sr.user_id
        LEFT JOIN service_request_interests sri ON sri.request_id = sr.id
        LEFT JOIN proposals p ON p.request_id = sr.id
+       WHERE u.is_active = TRUE AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
        GROUP BY sr.id, u.name
        ORDER BY sr.created_at DESC`,
     );
@@ -954,7 +1083,8 @@ app.get("/api/professionals", async (req, res) => {
        JOIN profiles p ON p.user_id = u.id
        JOIN professional_profiles pp ON pp.user_id = u.id
        LEFT JOIN follows f ON f.following_id = u.id
-       WHERE u.role = 'profissional' AND u.is_active = TRUE
+       WHERE u.role = 'profissional' AND u.is_active = TRUE AND p.is_public = TRUE
+         AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
          AND ($1 = '' OR u.name ILIKE '%' || $1 || '%' OR pp.specialty ILIKE '%' || $1 || '%')
          AND ($2 = '' OR pp.specialty ILIKE '%' || $2 || '%')
          AND ($3 = '' OR p.city ILIKE '%' || $3 || '%')
@@ -992,7 +1122,8 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
        JOIN profiles p ON p.user_id = u.id
        LEFT JOIN professional_profiles pp ON pp.user_id = u.id
        WHERE u.id = $1 AND u.role IN ('profissional', 'usuario', 'admin')
-         AND u.is_active = TRUE AND (p.is_public = TRUE OR u.id = $2)`,
+         AND u.is_active = TRUE AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+         AND (p.is_public = TRUE OR u.id = $2)`,
       [professionalId, res.locals.user.id],
     );
     if (!profileResult.rows[0]) return jsonError(res, 404, "Perfil não encontrado.");
@@ -1002,7 +1133,7 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
           (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = po.id) AS likes_count,
           (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = po.id) AS comments_count,
           EXISTS (SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $2) AS liked_by_me
-         FROM posts po WHERE po.user_id = $1 AND po.visibility = 'publico' ORDER BY po.created_at DESC`,
+         FROM posts po WHERE po.user_id = $1 AND po.visibility = 'publico' AND po.moderation_removed_at IS NULL ORDER BY po.created_at DESC`,
         [professionalId, res.locals.user.id],
       ),
       pool.query(
@@ -1423,8 +1554,7 @@ app.patch("/api/admin/service-issues/:id", requireAdmin, async (req, res) => {
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar o caso de serviço."); }
 });
 
-app.get("/api/wallet", requireUser, async (req, res) => {
-  if (res.locals.user.role !== "profissional") return res.json({ entries: [], completedBookings: [], totals: { income: 0, expenses: 0, balance: 0 } });
+app.get("/api/wallet", requireProfessional, async (req, res) => {
   try {
     const [entries, completedBookings] = await Promise.all([
       pool.query("SELECT * FROM wallet_entries WHERE user_id = $1 ORDER BY occurred_at DESC, id DESC LIMIT 500", [res.locals.user.id]),
@@ -1444,8 +1574,7 @@ app.get("/api/wallet", requireUser, async (req, res) => {
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar a Carteira."); }
 });
 
-app.post("/api/wallet/entries", requireUser, async (req, res) => {
-  if (res.locals.user.role !== "profissional") return jsonError(res, 403, "O controle financeiro está disponível para contas profissionais.");
+app.post("/api/wallet/entries", requireProfessional, async (req, res) => {
   const entryType = String(req.body?.entryType || "");
   const bookingId = req.body?.bookingId ? Number(req.body.bookingId) : null;
   const description = String(req.body?.description || "").trim();
@@ -1584,12 +1713,24 @@ async function ensureRuntimeSchema() {
     ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS image_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
     UPDATE service_requests SET image_urls = jsonb_build_array(image_url) WHERE image_url IS NOT NULL AND image_urls = '[]'::jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS estimated_days INTEGER;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS arrival_status VARCHAR(20) NOT NULL DEFAULT 'agendado';
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS professional_completed_at TIMESTAMPTZ;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_confirmed_at TIMESTAMPTZ;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS completion_image_url TEXT;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS final_amount NUMERIC(12,2);
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_status VARCHAR(24) NOT NULL DEFAULT 'nao_iniciado';
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_details TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reported_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_review_status VARCHAR(20) NOT NULL DEFAULT 'aberta';
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_review_note TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reviewed_at TIMESTAMPTZ;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_note TEXT;
+    ALTER TABLE reports ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_check;
     ALTER TABLE reports ADD CONSTRAINT reports_check CHECK (reported_user_id IS NOT NULL OR post_id IS NOT NULL OR request_id IS NOT NULL OR message_id IS NOT NULL);
     ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_status_check;
@@ -1600,11 +1741,37 @@ async function ensureRuntimeSchema() {
       report_id BIGINT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
       moderator_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
       previous_status VARCHAR(20) NOT NULL,
-      new_status VARCHAR(20) NOT NULL CHECK (new_status IN ('em_analise','resolvida','ignorada')),
+      new_status VARCHAR(20) NOT NULL CHECK (new_status IN ('aberta','em_analise','resolvida','ignorada')),
       note TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS report_events_report_created_idx ON report_events (report_id, created_at ASC);
+    ALTER TABLE report_events DROP CONSTRAINT IF EXISTS report_events_new_status_check;
+    ALTER TABLE report_events ADD CONSTRAINT report_events_new_status_check CHECK (new_status IN ('aberta','em_analise','resolvida','ignorada'));
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_hidden_until TIMESTAMPTZ;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_blocked_at TIMESTAMPTZ;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_blocked_until TIMESTAMPTZ;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_block_reason TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS moderation_action_note TEXT;
+    ALTER TABLE posts ADD COLUMN IF NOT EXISTS moderation_removed_at TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS account_appeals (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message TEXT NOT NULL CHECK (char_length(message) BETWEEN 10 AND 3000),
+      status VARCHAR(20) NOT NULL DEFAULT 'aberta' CHECK (status IN ('aberta','em_analise','resolvida','negada')),
+      admin_note TEXT,
+      reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      reviewed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS account_appeals_status_created_idx ON account_appeals (status, created_at ASC);
+    CREATE INDEX IF NOT EXISTS account_appeals_user_created_idx ON account_appeals (user_id, created_at DESC);
+    ALTER TABLE account_appeals ENABLE ROW LEVEL SECURITY;
+    REVOKE ALL ON TABLE account_appeals FROM PUBLIC;
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE ALL ON TABLE account_appeals FROM anon; END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE ALL ON TABLE account_appeals FROM authenticated; END IF;
+    END $$;
     ALTER TABLE report_events ENABLE ROW LEVEL SECURITY;
     REVOKE ALL ON TABLE report_events FROM PUBLIC;
     DO $$ BEGIN

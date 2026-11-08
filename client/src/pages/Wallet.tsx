@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
+import { Redirect } from "wouter";
 
 type Row = Record<string, any>;
 const money = (value: number) => value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -29,7 +30,10 @@ export default function Wallet() {
     setCompletedBookings(result.completedBookings);
     setTotals(result.totals);
   }, []);
-  useEffect(() => { void load().catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível carregar a Carteira.")).finally(() => setLoading(false)); }, [load]);
+  useEffect(() => {
+    if (user?.role !== "profissional") { setLoading(false); return; }
+    void load().catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível carregar a Carteira.")).finally(() => setLoading(false));
+  }, [load, user?.role]);
 
   async function registerReceipt(booking: Row) {
     setBusyId(Number(booking.booking_id));
@@ -56,9 +60,10 @@ export default function Wallet() {
   }
 
   const professional = user?.role === "profissional";
+  if (!professional) return <Redirect to="/painel" />;
   return <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100"><SiteHeader /><main className="container py-8 md:py-10">
     <div className="mb-7"><Badge className="mb-3 gap-1 bg-blue-100 text-blue-700"><WalletCards className="h-3.5 w-3.5" />Área financeira</Badge><h1 className="text-3xl font-bold tracking-tight">Carteira</h1><p className="mt-2 max-w-2xl text-muted-foreground">Controle particular dos valores recebidos e das despesas dos seus serviços.</p></div>
-    {!professional ? <Card className="border-dashed border-blue-200 bg-white/85"><CardContent className="p-8 text-center"><p className="font-semibold">A Carteira está disponível para profissionais.</p><p className="mt-1 text-sm text-muted-foreground">Ela mostra somente os registros financeiros da própria conta profissional.</p></CardContent></Card> : <>
+    {<>
       <Card className="mb-5 border-blue-100 bg-blue-50/70"><CardContent className="flex items-start gap-3 p-4"><CircleDollarSign className="mt-0.5 h-5 w-5 shrink-0 text-primary" /><p className="text-sm leading-6 text-slate-700">O ManiService não processa pagamentos, não retém dinheiro e não cobra comissão. A Carteira é um controle manual: o recebimento só é lançado quando o cliente informar que pagou ou quando você registrar que recebeu diretamente. Se ainda não recebeu, deixe sem registrar.</p></CardContent></Card>
       <div className="grid gap-4 sm:grid-cols-3"><Summary label="Recebimentos anotados" value={loading ? "…" : money(totals.income)} icon={ArrowDownToLine} /><Summary label="Despesas anotadas" value={loading ? "…" : money(totals.expenses)} icon={CircleDollarSign} /><Summary label="Saldo registrado" value={loading ? "…" : money(totals.balance)} icon={WalletCards} /></div>
 

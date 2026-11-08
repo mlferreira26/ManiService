@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
 
-export type AuthUser = { id: number; name: string; email: string; role: string };
+export type AuthUser = { id: number; name: string; email: string; role: string; isModerationBlocked?: boolean; moderationBlockedUntil?: string | null; moderationBlockReason?: string | null };
 type AuthContextValue = {
   user: AuthUser | null;
   loading: boolean;

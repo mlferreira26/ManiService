@@ -26,11 +26,17 @@ import AdminUsers from "./pages/AdminUsers";
 import AdminUserProfile from "./pages/AdminUserProfile";
 import ServicesTracking from "./pages/ServicesTracking";
 import Wallet from "./pages/Wallet";
+import AccountBlocked from "./pages/AccountBlocked";
+import { useLocation } from "wouter";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
+  const [location] = useLocation();
   if (loading) return <div className="flex min-h-screen items-center justify-center bg-slate-50 text-sm text-muted-foreground">Verificando seu acesso...</div>;
-  return user ? <>{children}</> : <Redirect to="/login" />;
+  if (!user) return <Redirect to="/login" />;
+  if (user.isModerationBlocked && location !== "/conta-bloqueada") return <Redirect to="/conta-bloqueada" />;
+  if (!user.isModerationBlocked && location === "/conta-bloqueada") return <Redirect to="/servicos" />;
+  return <>{children}</>;
 }
 function Guarded({ children }: { children: React.ReactNode }) { return <Protected>{children}</Protected>; }
 
@@ -49,7 +55,7 @@ function AccountRoute() {
 function LoginRoute() {
   const { user, loading } = useAuth();
   if (loading) return <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">Verificando seu acesso...</div>;
-  return user && !new URLSearchParams(window.location.search).has("mode") ? <Redirect to="/servicos" /> : <Login />;
+  return user && !new URLSearchParams(window.location.search).has("mode") ? <Redirect to={user.isModerationBlocked ? "/conta-bloqueada" : "/servicos"} /> : <Login />;
 }
 
 function Router() {
@@ -57,6 +63,7 @@ function Router() {
     <Route path="/" component={PublicHome} />
     <Route path="/criar-conta" component={AccountRoute} />
     <Route path="/login" component={LoginRoute} />
+    <Route path="/conta-bloqueada"><Guarded><AccountBlocked /></Guarded></Route>
     <Route path="/inicio"><Guarded><Home /></Guarded></Route>
     <Route path="/para-consumidores"><Guarded><ParaConsumidores /></Guarded></Route>
     <Route path="/para-prestadores"><Guarded><ParaPrestadores /></Guarded></Route>

@@ -38,8 +38,8 @@ export default function Login() {
         setMessage("Senha alterada. Entre com sua nova senha.");
       } else {
         if (user) await logout();
-        await login({ email, password });
-        setLocation("/servicos");
+        const signedInUser = await login({ email, password });
+        setLocation(signedInUser.isModerationBlocked ? "/conta-bloqueada" : "/servicos");
       }
     } catch (err) { setError(err instanceof Error ? err.message : "Não foi possível concluir."); }
     finally { setLoading(false); }
