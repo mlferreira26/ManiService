@@ -33,11 +33,14 @@ export default function Home() {
           <div className="relative mx-auto w-full max-w-lg">
             <div className="absolute -left-5 top-10 h-24 w-24 rounded-3xl bg-amber-300/70" />
             <div className="absolute -bottom-5 -right-3 h-32 w-32 rounded-full bg-blue-200/80" />
-            <div className="relative overflow-hidden rounded-[2rem] border-8 border-white bg-gradient-to-br from-blue-800 via-blue-700 to-cyan-500 p-8 shadow-2xl shadow-blue-950/20 sm:p-10">
-              <div className="absolute -right-12 -top-12 h-48 w-48 rounded-full border-[28px] border-white/10" />
-              <div className="relative flex aspect-[1.12] flex-col justify-between text-white">
-                <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/15"><BriefcaseBusiness className="h-7 w-7" /></div>
-                <div><p className="text-sm font-semibold uppercase tracking-[0.2em] text-blue-100">ManiService</p><p className="mt-2 text-3xl font-bold leading-tight">Quem sabe fazer,<br />encontra espaço.</p><p className="mt-3 max-w-xs text-sm leading-6 text-blue-100">Uma vitrine para o talento de quem trabalha por conta própria.</p></div>
+            <div className="relative aspect-[1.12] overflow-hidden rounded-[2rem] border-8 border-white bg-blue-100 shadow-2xl shadow-blue-950/20">
+              <img src="/hero-jardim.png" alt="Moradora olhando o jardim e procurando ajuda para cuidar dele" className="absolute inset-0 h-full w-full object-cover" />
+              <div className="absolute inset-0 bg-gradient-to-t from-slate-950/55 via-transparent to-slate-950/10" />
+              <div className="absolute left-5 top-5 inline-flex items-center gap-2 rounded-full border border-white/70 bg-white/90 px-3 py-2 text-xs font-semibold text-blue-900 shadow-lg backdrop-blur-sm sm:left-7 sm:top-7"><span className="h-2 w-2 rounded-full bg-emerald-500" />Ajuda para sua casa, perto de você</div>
+              <div className="absolute bottom-5 left-5 max-w-[55%] text-white drop-shadow-md sm:bottom-7 sm:left-7"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-100">ManiService</p><p className="mt-1 text-xl font-bold leading-tight sm:text-2xl">Do jardim ao reparo,<br />encontre quem resolve.</p></div>
+              <div className="absolute bottom-5 right-4 w-[38%] overflow-hidden rounded-2xl border-4 border-white shadow-2xl sm:bottom-7 sm:right-6">
+                <img src="/hero-parede.png" alt="Moradora fotografando uma parede que precisa de reparo" className="aspect-[4/3] w-full object-cover" />
+                <div className="bg-white px-2 py-2 text-[10px] font-semibold leading-tight text-slate-800 sm:px-3 sm:text-xs">Parede precisando de reparo?</div>
               </div>
             </div>
             <div className="absolute -bottom-7 left-4 flex items-center gap-3 rounded-2xl border border-slate-100 bg-white px-4 py-3 shadow-lg sm:left-[-2rem]"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-700"><ShieldCheck className="h-5 w-5" /></span><span><span className="block text-sm font-bold">Conheça antes de combinar</span><span className="block text-xs text-slate-500">Perfil, avaliações e conversa direta</span></span></div>
