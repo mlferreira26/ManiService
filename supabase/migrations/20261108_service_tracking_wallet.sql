@@ -28,6 +28,7 @@ ALTER TABLE public.bookings ADD CONSTRAINT bookings_payment_status_check
 ALTER TABLE public.bookings DROP CONSTRAINT IF EXISTS bookings_issue_review_status_check;
 ALTER TABLE public.bookings ADD CONSTRAINT bookings_issue_review_status_check
   CHECK (issue_review_status IN ('aberta', 'em_analise', 'resolvida', 'ignorada'));
+ALTER TABLE public.bookings ALTER COLUMN status TYPE VARCHAR(32);
 ALTER TABLE public.bookings DROP CONSTRAINT IF EXISTS bookings_status_check;
 ALTER TABLE public.bookings ADD CONSTRAINT bookings_status_check
   CHECK (status IN ('agendado', 'em_execucao', 'aguardando_confirmacao', 'concluido', 'em_disputa', 'cancelado'));

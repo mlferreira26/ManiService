@@ -1866,6 +1866,7 @@ async function ensureRuntimeSchema() {
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_review_note TEXT;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reviewed_at TIMESTAMPTZ;
+    ALTER TABLE bookings ALTER COLUMN status TYPE VARCHAR(32);
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
