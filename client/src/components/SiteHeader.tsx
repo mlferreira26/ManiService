@@ -18,10 +18,10 @@ export default function SiteHeader() {
   const lastChatMessageIds = useRef<Record<number, number>>({});
   const { user, loading, logout } = useAuth();
   const appLinks = [
-    { href: "/comunidades", label: "Comunidades", icon: Users },
+    { href: "/comunidades", label: "Serviços na Região", icon: Users },
     { href: "/mensagens", label: "Mensagens", icon: MessageCircle },
     { href: "/configuracoes", label: "Configurações", icon: SettingsIcon },
-    { href: "/servicos", label: "Serviços acontecendo", icon: Newspaper },
+    { href: "/servicos", label: "Comunidade", icon: Newspaper },
     { href: "/servicos/acompanhar", label: "Acompanhar serviços", icon: CalendarDays },
     { href: "/carteira", label: "Carteira", icon: WalletCards },
   ];
