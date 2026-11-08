@@ -1,11 +1,12 @@
 import { Bell, BriefcaseBusiness, CalendarDays, LayoutDashboard, LogOut, Menu, MessageCircle, Newspaper, Search, Settings as SettingsIcon, ShieldCheck, Users, WalletCards } from "lucide-react";
 import { Link, useLocation } from "wouter";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/contexts/AuthContext";
 import { api } from "@/lib/api";
+import { playChatNotificationSound } from "@/lib/chat-sound";
 
 export default function SiteHeader() {
   const [location, setLocation] = useLocation();
@@ -14,6 +15,7 @@ export default function SiteHeader() {
   const [notifications, setNotifications] = useState<Array<Record<string, any>>>([]);
   const [hasUnreadMessages, setHasUnreadMessages] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const lastChatMessageIds = useRef<Record<number, number>>({});
   const { user, loading, logout } = useAuth();
   const appLinks = [
     { href: "/comunidades", label: "Comunidades", icon: Users },
@@ -34,7 +36,7 @@ export default function SiteHeader() {
   const connected = Boolean(user);
   const allLinks = [...quickLinks, ...appLinks, ...adminLinks];
   const publicProfileId = location.startsWith("/perfil/") ? Number(location.slice("/perfil/".length).split(/[/?#]/)[0]) : null;
-  const brandHref = connected && publicProfileId === Number(user?.id) ? "/perfil" : connected ? "/painel" : "/";
+  const brandHref = connected && publicProfileId === Number(user?.id) ? "/perfil" : connected ? "/servicos" : "/";
 
   useEffect(() => {
     if (!connected) { setNotifications([]); return; }
@@ -46,10 +48,26 @@ export default function SiteHeader() {
   }, [connected, user?.id]);
 
   useEffect(() => {
-    if (!connected) { setHasUnreadMessages(false); return; }
+    if (!connected) { setHasUnreadMessages(false); lastChatMessageIds.current = {}; return; }
+    lastChatMessageIds.current = {};
     let active = true;
+    let hasInitialSnapshot = false;
     const load = () => api.conversations().then(({ conversations }) => {
-      if (active) setHasUnreadMessages(conversations.some((conversation) => Number(conversation.unread_count || 0) > 0));
+      if (!active) return;
+      const nextIds: Record<number, number> = {};
+      let hasIncomingMessage = false;
+      conversations.forEach((conversation) => {
+        const conversationId = Number(conversation.id);
+        const messageId = Number(conversation.last_message_id || 0);
+        nextIds[conversationId] = messageId;
+        if (hasInitialSnapshot && messageId > 0 && messageId > (lastChatMessageIds.current[conversationId] || 0) && Number(conversation.last_message_sender_id) !== Number(user?.id)) {
+          hasIncomingMessage = true;
+        }
+      });
+      lastChatMessageIds.current = nextIds;
+      if (hasIncomingMessage) playChatNotificationSound();
+      setHasUnreadMessages(conversations.some((conversation) => Number(conversation.unread_count || 0) > 0));
+      hasInitialSnapshot = true;
     }).catch(() => undefined);
     void load();
     const timer = window.setInterval(() => void load(), 10000);

@@ -37,19 +37,19 @@ function Guarded({ children }: { children: React.ReactNode }) { return <Protecte
 function PublicHome() {
   const { user, loading } = useAuth();
   if (loading) return <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">Verificando seu acesso...</div>;
-  return user ? <Redirect to="/painel" /> : <Home />;
+  return user ? <Redirect to="/servicos" /> : <Home />;
 }
 
 function AccountRoute() {
   const { user, loading } = useAuth();
   if (loading) return <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">Verificando seu acesso...</div>;
-  return user ? <Redirect to="/painel" /> : <Account />;
+  return user ? <Redirect to="/servicos" /> : <Account />;
 }
 
 function LoginRoute() {
   const { user, loading } = useAuth();
   if (loading) return <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">Verificando seu acesso...</div>;
-  return user && !new URLSearchParams(window.location.search).has("mode") ? <Redirect to="/painel" /> : <Login />;
+  return user && !new URLSearchParams(window.location.search).has("mode") ? <Redirect to="/servicos" /> : <Login />;
 }
 
 function Router() {

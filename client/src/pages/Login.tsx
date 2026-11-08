@@ -39,7 +39,7 @@ export default function Login() {
       } else {
         if (user) await logout();
         await login({ email, password });
-        setLocation("/painel");
+        setLocation("/servicos");
       }
     } catch (err) { setError(err instanceof Error ? err.message : "Não foi possível concluir."); }
     finally { setLoading(false); }

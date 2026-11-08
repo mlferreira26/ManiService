@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useRoute } from "wouter";
 import { ArrowLeft, BriefcaseBusiness, CheckCircle2, Heart, MapPin, MessageCircle, Star, UserRoundPlus, Users } from "lucide-react";
 import { toast } from "sonner";
@@ -8,7 +8,6 @@ import ReportButton from "@/components/ReportButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -27,9 +26,6 @@ export default function ProfessionalProfile() {
   const [reviews, setReviews] = useState<Review[]>([]);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
-  const [rating, setRating] = useState(5);
-  const [comment, setComment] = useState("");
-  const [submittingReview, setSubmittingReview] = useState(false);
   const isOwnProfile = Number(user?.id) === id;
 
   const load = useCallback(async () => {
@@ -63,19 +59,6 @@ export default function ProfessionalProfile() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível iniciar a conversa."); }
   }
 
-  async function submitReview(event: FormEvent) {
-    event.preventDefault();
-    if (!profile || submittingReview) return;
-    setSubmittingReview(true);
-    try {
-      await api.createReview({ userId: id, rating, comment: comment.trim() || undefined });
-      setComment("");
-      toast.success("Sua avaliação foi registrada.");
-      await load();
-    } catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível registrar a avaliação."); }
-    finally { setSubmittingReview(false); }
-  }
-
   async function reactToPost(post: Post) {
     try {
       const result = await api.reactToPost(post.id);
@@ -103,7 +86,7 @@ export default function ProfessionalProfile() {
         </aside>
       </div>
 
-      {!isOwnProfile && ["usuario", "profissional"].includes(String(user?.role)) && <Card className="mt-6"><CardHeader><CardTitle className="text-lg">Avaliar {profile.name}</CardTitle></CardHeader><CardContent>{profile.has_reviewed ? <p className="text-sm text-muted-foreground">Você já avaliou este perfil. Obrigado por compartilhar sua experiência.</p> : <><p className="mb-3 text-sm text-muted-foreground">Avalie alguém com quem você conversou pelo ManiService.</p><form onSubmit={submitReview} className="space-y-3"><div className="flex items-center gap-1" aria-label={`Nota selecionada: ${rating} de 5`}>{[1, 2, 3, 4, 5].map((value) => <button key={value} type="button" onClick={() => setRating(value)} aria-label={`${value} estrelas`}><Star className={`h-6 w-6 ${value <= rating ? "fill-amber-400 text-amber-400" : "text-slate-300"}`} /></button>)}</div><Textarea value={comment} maxLength={2000} onChange={(event) => setComment(event.target.value)} placeholder="Conte como foi sua experiência (opcional)" /><div className="flex justify-end"><Button type="submit" disabled={submittingReview}>{submittingReview ? "Enviando..." : "Publicar avaliação"}</Button></div></form></>}</CardContent></Card>}
+      {!isOwnProfile && profile.role === "profissional" && <Card className="mt-6"><CardContent className="p-4 text-sm text-muted-foreground">As avaliações ficam disponíveis depois que um cliente confirma a conclusão de um serviço e avalia a experiência em “Acompanhar serviços”.</CardContent></Card>}
 
       <section className="mt-8"><div className="mb-4 flex items-center gap-2"><BriefcaseBusiness className="h-5 w-5 text-primary" /><div><h2 className="text-2xl font-bold">Linha do tempo</h2><p className="text-sm text-muted-foreground">Publicações de {profile.role === "profissional" ? "este profissional" : "este consumidor"}.</p></div></div>{posts.length ? <div className="space-y-4">{posts.map((post) => <Card key={post.id} className="overflow-hidden"><CardContent className="p-5">{post.image_url && <img src={post.image_url} alt={post.title} className="mb-4 max-h-96 w-full rounded-xl object-cover" />}<div className="mb-2 flex items-center justify-between"><p className="text-xs text-muted-foreground">{dateLabel(post.created_at)}</p>{!isOwnProfile && <ReportButton targetType="post" targetId={post.id} compact />}</div><h3 className="text-lg font-bold">{post.title}</h3><p className="mt-2 whitespace-pre-line text-sm leading-6 text-muted-foreground">{post.description}</p><div className="mt-4 border-t pt-3"><Button type="button" variant={post.liked_by_me ? "default" : "outline"} size="sm" onClick={() => void reactToPost(post)}><Heart className={`mr-2 h-4 w-4 ${post.liked_by_me ? "fill-current" : ""}`} />{post.likes_count || 0} {post.likes_count === 1 ? "reação" : "reações"}</Button><PostComments postId={post.id} count={post.comments_count} onCountChange={(count) => updateCommentCount(post.id, count)} /></div></CardContent></Card>)}</div> : <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">Este perfil ainda não publicou na linha do tempo.</CardContent></Card>}</section>
     </>}

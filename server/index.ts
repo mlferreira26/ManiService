@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import dotenv from "dotenv";
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -108,6 +108,30 @@ async function notifyUser(userId: number | string, type: string, title: string, 
      VALUES ($1, $2, $3, $4, $5)`,
     [userId, type, title, body, link],
   );
+}
+
+async function addBookingChatEvent(
+  client: PoolClient,
+  booking: { customer_id: number | string; professional_id: number | string; request_id?: number | string | null; proposal_id?: number | string | null },
+  senderId: number | string,
+  body: string,
+  attachmentUrl: string | null = null,
+) {
+  const found = await client.query(
+    `SELECT id FROM conversations
+     WHERE customer_id = $1 AND professional_id = $2
+       AND (request_id IS NOT DISTINCT FROM $3 OR proposal_id IS NOT DISTINCT FROM $4)
+     ORDER BY id LIMIT 1`,
+    [booking.customer_id, booking.professional_id, booking.request_id ?? null, booking.proposal_id ?? null],
+  );
+  const conversation = found.rows[0] || (await client.query(
+    `INSERT INTO conversations (customer_id, professional_id, request_id, proposal_id)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [booking.customer_id, booking.professional_id, booking.request_id ?? null, booking.proposal_id ?? null],
+  )).rows[0];
+  await client.query("INSERT INTO messages (conversation_id, sender_id, body, attachment_url) VALUES ($1, $2, $3, $4)", [conversation.id, senderId, body, attachmentUrl]);
+  await client.query("UPDATE conversations SET updated_at = NOW() WHERE id = $1", [conversation.id]);
+  return conversation.id as number;
 }
 
 async function processServiceReminders() {
@@ -702,13 +726,14 @@ app.get("/api/conversations", requireUser, async (_req, res) => {
         CASE WHEN c.customer_id = $1 THEN c.professional_id ELSE c.customer_id END AS other_user_id,
         CASE WHEN u.role = 'admin' THEN 'Equipe ManiService' ELSE u.name END AS other_user_name,
         u.role AS other_user_role, p.avatar_url AS other_user_avatar_url,
+        lm.id AS last_message_id, lm.sender_id AS last_message_sender_id,
         lm.body AS last_message, lm.created_at AS last_message_at,
         (SELECT COUNT(*)::int FROM messages unread
          WHERE unread.conversation_id = c.id AND unread.sender_id <> $1 AND unread.read_at IS NULL) AS unread_count
        FROM conversations c
        JOIN users u ON u.id = CASE WHEN c.customer_id = $1 THEN c.professional_id ELSE c.customer_id END
        LEFT JOIN profiles p ON p.user_id = u.id
-       LEFT JOIN LATERAL (SELECT body, created_at FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) lm ON TRUE
+       LEFT JOIN LATERAL (SELECT id, sender_id, body, created_at FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1) lm ON TRUE
        WHERE c.customer_id = $1 OR c.professional_id = $1 ORDER BY COALESCE(lm.created_at, c.updated_at) DESC`,
       [res.locals.user.id],
     );
@@ -1191,6 +1216,8 @@ app.post("/api/proposals/:id/accept", requireUser, async (req, res) => {
     }
     await client.query("UPDATE proposals SET status = CASE WHEN id = $2 THEN 'aceito' ELSE 'recusado' END, updated_at = NOW() WHERE request_id = $1", [proposal.request_id, proposal.id]);
     await client.query("UPDATE service_requests SET status = 'em_execucao', updated_at = NOW() WHERE id = $1", [proposal.request_id]);
+    const startLabel = new Intl.DateTimeFormat("pt-BR", { dateStyle: "medium", timeStyle: "short", timeZone: "America/Sao_Paulo" }).format(scheduledAt);
+    await addBookingChatEvent(client, createdBooking, res.locals.user.id, `Orçamento aceito. Serviço agendado para ${startLabel}. Valor combinado: R$ ${Number(proposal.amount).toFixed(2).replace(".", ",")}.`);
     await client.query("COMMIT");
     await notifyUser(professionalId, "servico_agendado", "Orçamento aceito", `${res.locals.user.name} aceitou seu orçamento para ${proposal.title}.`, "/servicos/acompanhar").catch((error) => console.error("Não foi possível notificar sobre o agendamento:", error));
     res.status(201).json({ booking });
@@ -1204,7 +1231,11 @@ app.post("/api/proposals/:id/accept", requireUser, async (req, res) => {
 app.get("/api/bookings", requireUser, async (_req, res) => {
   try {
     const result = await pool.query(
-      `SELECT b.*, u.name AS other_user_name, sr.title
+      `SELECT b.*, u.name AS other_user_name, sr.title,
+        EXISTS (SELECT 1 FROM reviews r WHERE r.booking_id = b.id AND r.reviewer_id = $1) AS reviewed_by_me,
+        (SELECT c.id FROM conversations c WHERE c.customer_id = b.customer_id AND c.professional_id = b.professional_id
+          AND (c.request_id IS NOT DISTINCT FROM b.request_id OR c.proposal_id IS NOT DISTINCT FROM b.proposal_id)
+          ORDER BY c.id LIMIT 1) AS conversation_id
        FROM bookings b
        JOIN users u ON u.id = CASE WHEN b.customer_id = $1 THEN b.professional_id ELSE b.customer_id END
        LEFT JOIN service_requests sr ON sr.id = b.request_id
@@ -1223,48 +1254,114 @@ app.post("/api/bookings/:id/arrival", requireUser, async (req, res) => {
   const bookingId = Number(req.params.id);
   const status = String(req.body?.status || "");
   if (!Number.isInteger(bookingId) || !["a_caminho", "cheguei"].includes(status)) return jsonError(res, 400, "Atualização de chegada inválida.");
+  const client = await pool.connect();
   try {
-    const result = await pool.query("UPDATE bookings SET arrival_status = $1, updated_at = NOW() WHERE id = $2 AND professional_id = $3 AND status IN ('agendado', 'em_execucao') RETURNING *", [status, bookingId, res.locals.user.id]);
-    if (!result.rows[0]) return jsonError(res, 404, "Serviço não encontrado ou indisponível.");
+    await client.query("BEGIN");
+    const result = await client.query("UPDATE bookings SET arrival_status = $1, updated_at = NOW() WHERE id = $2 AND professional_id = $3 AND status IN ('agendado', 'em_execucao') RETURNING *", [status, bookingId, res.locals.user.id]);
+    if (!result.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 404, "Serviço não encontrado ou indisponível."); }
     const booking = result.rows[0];
+    await addBookingChatEvent(client, booking, res.locals.user.id, status === "a_caminho" ? "O profissional avisou: estou a caminho." : "O profissional avisou: cheguei ao local.");
+    await client.query("COMMIT");
     await notifyUser(booking.customer_id, "servico_chegada", status === "a_caminho" ? "Profissional a caminho" : "Profissional chegou", status === "a_caminho" ? "O profissional avisou que está a caminho." : "O profissional avisou que chegou ao local.", "/servicos/acompanhar").catch(() => undefined);
     res.json({ booking });
-  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar a chegada."); }
+  } catch (error) { await client.query("ROLLBACK").catch(() => undefined); console.error(error); jsonError(res, 500, "Não foi possível atualizar a chegada."); }
+  finally { client.release(); }
 });
 
 app.post("/api/bookings/:id/start", requireUser, async (req, res) => {
+  const client = await pool.connect();
   try {
-    const result = await pool.query("UPDATE bookings SET status = 'em_execucao', updated_at = NOW() WHERE id = $1 AND professional_id = $2 AND status = 'agendado' RETURNING *", [req.params.id, res.locals.user.id]);
-    if (!result.rows[0]) return jsonError(res, 404, "Serviço não encontrado ou já iniciado.");
+    await client.query("BEGIN");
+    const result = await client.query("UPDATE bookings SET status = 'em_execucao', updated_at = NOW() WHERE id = $1 AND professional_id = $2 AND status = 'agendado' RETURNING *", [req.params.id, res.locals.user.id]);
+    if (!result.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 404, "Serviço não encontrado ou já iniciado."); }
+    await addBookingChatEvent(client, result.rows[0], res.locals.user.id, "O profissional iniciou o serviço.");
+    await client.query("COMMIT");
     await notifyUser(result.rows[0].customer_id, "servico_iniciado", "Serviço iniciado", "O profissional iniciou o serviço contratado.", "/servicos/acompanhar").catch(() => undefined);
     res.json({ booking: result.rows[0] });
-  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível iniciar o serviço."); }
+  } catch (error) { await client.query("ROLLBACK").catch(() => undefined); console.error(error); jsonError(res, 500, "Não foi possível iniciar o serviço."); }
+  finally { client.release(); }
 });
 
 app.post("/api/bookings/:id/complete", requireUser, async (req, res) => {
+  const bookingId = Number(req.params.id);
+  const completionImageUrl = String(req.body?.completionImageUrl || "").trim() || null;
+  const finalAmount = Number(req.body?.finalAmount);
+  if (!Number.isInteger(bookingId) || bookingId < 1) return jsonError(res, 400, "Serviço inválido.");
+  if (!Number.isFinite(finalAmount) || finalAmount < 0) return jsonError(res, 400, "Informe um valor final válido.");
+  if (completionImageUrl && (!completionImageUrl.startsWith("/") && !completionImageUrl.startsWith("https://"))) return jsonError(res, 400, "A foto de conclusão não é válida.");
+  const client = await pool.connect();
   try {
-    const result = await pool.query("UPDATE bookings SET status = 'aguardando_confirmacao', professional_completed_at = NOW(), updated_at = NOW() WHERE id = $1 AND professional_id = $2 AND status = 'em_execucao' RETURNING *", [req.params.id, res.locals.user.id]);
-    if (!result.rows[0]) return jsonError(res, 409, "Inicie o serviço antes de marcá-lo como concluído.");
+    await client.query("BEGIN");
+    const result = await client.query("UPDATE bookings SET status = 'aguardando_confirmacao', final_amount = $3, completion_image_url = $4, professional_completed_at = NOW(), updated_at = NOW() WHERE id = $1 AND professional_id = $2 AND status = 'em_execucao' RETURNING *", [bookingId, res.locals.user.id, finalAmount, completionImageUrl]);
+    if (!result.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 409, "Inicie o serviço antes de marcá-lo como concluído."); }
+    const amountText = `Valor final proposto: R$ ${finalAmount.toFixed(2).replace(".", ",")}.`;
+    await addBookingChatEvent(client, result.rows[0], res.locals.user.id, `O profissional marcou o serviço como concluído. ${amountText} Confira o acompanhamento e confirme ou informe um problema.`, completionImageUrl);
+    await client.query("COMMIT");
     await notifyUser(result.rows[0].customer_id, "servico_concluido", "Confirme a conclusão", "O profissional marcou o serviço como concluído. Confira e confirme ou informe um problema.", "/servicos/acompanhar").catch(() => undefined);
     res.json({ booking: result.rows[0] });
-  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível concluir o serviço."); }
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error("Não foi possível marcar o serviço como concluído:", error);
+    if ((error as { code?: string }).code === "23514") {
+      return jsonError(res, 503, "O banco ainda não permite a etapa de confirmação do cliente. Atualize a migração de acompanhamento no Supabase e tente novamente.");
+    }
+    jsonError(res, 500, "Não foi possível concluir o serviço.");
+  } finally { client.release(); }
 });
 
 app.post("/api/bookings/:id/confirm", requireUser, async (req, res) => {
+  const client = await pool.connect();
+  const paidDirectly = req.body?.paidDirectly === true;
   try {
-    const result = await pool.query("UPDATE bookings SET status = 'concluido', customer_confirmed_at = NOW(), payment_status = 'aguardando_integracao', updated_at = NOW() WHERE id = $1 AND customer_id = $2 AND status = 'aguardando_confirmacao' AND issue_details IS NULL RETURNING *", [req.params.id, res.locals.user.id]);
-    if (!result.rows[0]) return jsonError(res, 409, "Este serviço ainda não está disponível para confirmação.");
-    await notifyUser(result.rows[0].professional_id, "servico_confirmado", "Conclusão confirmada", "O cliente confirmou a conclusão. O pagamento ficará disponível quando o Mercado Pago estiver integrado.", "/servicos/acompanhar").catch(() => undefined);
-    res.json({ booking: result.rows[0] });
-  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível confirmar a conclusão."); }
+    await client.query("BEGIN");
+    const result = await client.query("UPDATE bookings SET status = 'concluido', customer_confirmed_at = NOW(), updated_at = NOW() WHERE id = $1 AND customer_id = $2 AND status = 'aguardando_confirmacao' AND (issue_details IS NULL OR issue_review_status = 'resolvida') RETURNING *", [req.params.id, res.locals.user.id]);
+    if (!result.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 409, "Este serviço ainda não está disponível para confirmação. Se houver um problema em análise, aguarde a equipe."); }
+    const booking = result.rows[0];
+    const finalAmount = Number(booking.final_amount ?? booking.agreed_amount);
+    await client.query("UPDATE service_requests SET status = 'concluido', updated_at = NOW() WHERE id = $1", [booking.request_id]);
+    await addBookingChatEvent(client, booking, res.locals.user.id, paidDirectly
+      ? `O cliente confirmou a conclusão e informou que pagou diretamente ao profissional (R$ ${finalAmount.toFixed(2).replace(".", ",")}).`
+      : "O cliente confirmou a conclusão do serviço.");
+    if (paidDirectly) {
+      await client.query(
+        `INSERT INTO wallet_entries (user_id, booking_id, entry_type, description, amount, payment_method, report_source, reported_by_user_id)
+         SELECT b.professional_id, b.id, 'receita', 'Serviço concluído: ' || COALESCE(sr.title, 'serviço'), $2,
+           'informado pelo cliente', 'cliente_confirmou', $3
+         FROM bookings b LEFT JOIN service_requests sr ON sr.id = b.request_id WHERE b.id = $1
+         ON CONFLICT DO NOTHING`,
+        [booking.id, finalAmount, res.locals.user.id],
+      );
+    }
+    if (booking.completion_image_url) {
+      await client.query(
+        `INSERT INTO posts (user_id, title, description, image_url, visibility)
+         SELECT b.professional_id, LEFT('Serviço concluído: ' || COALESCE(sr.title, 'serviço'), 180),
+           'Serviço concluído em ' || TO_CHAR(COALESCE(b.professional_completed_at, NOW()) AT TIME ZONE 'America/Sao_Paulo', 'DD/MM/YYYY') || '.',
+           b.completion_image_url, 'publico'
+         FROM bookings b LEFT JOIN service_requests sr ON sr.id = b.request_id
+         WHERE b.id = $1 AND b.completion_image_url IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.user_id = b.professional_id AND p.image_url = b.completion_image_url AND p.title = LEFT('Serviço concluído: ' || COALESCE(sr.title, 'serviço'), 180))`,
+        [booking.id],
+      );
+    }
+    await client.query("COMMIT");
+    await notifyUser(booking.professional_id, "servico_confirmado", "Conclusão confirmada", paidDirectly ? "O cliente confirmou o serviço e informou o pagamento direto. O valor foi anotado na sua Carteira." : "O cliente confirmou a conclusão do serviço.", "/servicos/acompanhar").catch(() => undefined);
+    res.json({ booking, paidDirectly });
+  } catch (error) { await client.query("ROLLBACK").catch(() => undefined); console.error(error); jsonError(res, 500, "Não foi possível confirmar a conclusão."); }
+  finally { client.release(); }
 });
 
 app.post("/api/bookings/:id/issue", requireUser, async (req, res) => {
   const details = String(req.body?.details || "").trim();
   if (!details || details.length > 3000) return jsonError(res, 400, "Descreva o problema em até 3.000 caracteres.");
+  const client = await pool.connect();
   try {
-    const result = await pool.query("UPDATE bookings SET status = 'em_disputa', payment_status = 'problema', issue_details = $1, issue_reported_by = $2, updated_at = NOW() WHERE id = $3 AND customer_id = $2 AND status = 'aguardando_confirmacao' RETURNING *", [details, res.locals.user.id, req.params.id]);
-    if (!result.rows[0]) return jsonError(res, 409, "Só é possível informar um problema enquanto a conclusão aguarda confirmação.");
+    await client.query("BEGIN");
+    const result = await client.query("UPDATE bookings SET status = 'em_disputa', issue_details = $1, issue_reported_by = $2, issue_review_status = 'aberta', updated_at = NOW() WHERE id = $3 AND customer_id = $2 AND status = 'aguardando_confirmacao' RETURNING *", [details, res.locals.user.id, req.params.id]);
+    if (!result.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 409, "Só é possível informar um problema enquanto a conclusão aguarda confirmação."); }
+    await addBookingChatEvent(client, result.rows[0], res.locals.user.id, `O cliente informou um problema e pediu análise antes de confirmar a conclusão: ${details}`);
+    await client.query("UPDATE service_requests SET status = 'em_analise', updated_at = NOW() WHERE id = $1", [result.rows[0].request_id]);
+    await client.query("COMMIT");
     await notifyUser(result.rows[0].professional_id, "problema_servico", "Problema informado pelo cliente", "O cliente pediu análise do serviço antes de confirmar a conclusão.", "/servicos").catch(() => undefined);
     await pool.query(
       `INSERT INTO notifications (user_id, type, title, body, link)
@@ -1273,7 +1370,8 @@ app.post("/api/bookings/:id/issue", requireUser, async (req, res) => {
       [`${res.locals.user.name} informou um problema no serviço #${result.rows[0].id}.`],
     ).catch((error) => console.error("Não foi possível avisar a equipe sobre o caso:", error));
     res.json({ booking: result.rows[0] });
-  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível registrar o problema."); }
+  } catch (error) { await client.query("ROLLBACK").catch(() => undefined); console.error(error); jsonError(res, 500, "Não foi possível registrar o problema."); }
+  finally { client.release(); }
 });
 
 app.get("/api/admin/service-issues", requireAdmin, async (req, res) => {
@@ -1326,20 +1424,57 @@ app.patch("/api/admin/service-issues/:id", requireAdmin, async (req, res) => {
 });
 
 app.get("/api/wallet", requireUser, async (req, res) => {
+  if (res.locals.user.role !== "profissional") return res.json({ entries: [], completedBookings: [], totals: { income: 0, expenses: 0, balance: 0 } });
   try {
-    const [settings, transactions] = await Promise.all([
-      pool.query("SELECT value FROM platform_settings WHERE key = 'commission_rate_percent'"),
+    const [entries, completedBookings] = await Promise.all([
+      pool.query("SELECT * FROM wallet_entries WHERE user_id = $1 ORDER BY occurred_at DESC, id DESC LIMIT 500", [res.locals.user.id]),
       pool.query(
-        `SELECT pt.*, b.customer_id, b.professional_id, sr.title
-         FROM payment_transactions pt JOIN bookings b ON b.id = pt.booking_id
-         LEFT JOIN service_requests sr ON sr.id = b.request_id
-         WHERE ($2::boolean = TRUE OR b.customer_id = $1 OR b.professional_id = $1)
-         ORDER BY pt.created_at DESC`, [res.locals.user.id, res.locals.user.role === "admin"],
+        `SELECT b.id AS booking_id, b.final_amount, b.agreed_amount, b.customer_confirmed_at,
+          sr.title, customer.name AS customer_name
+         FROM bookings b LEFT JOIN service_requests sr ON sr.id = b.request_id
+         JOIN users customer ON customer.id = b.customer_id
+         WHERE b.professional_id = $1 AND b.status = 'concluido'
+           AND NOT EXISTS (SELECT 1 FROM wallet_entries e WHERE e.booking_id = b.id AND e.entry_type = 'receita')
+         ORDER BY b.customer_confirmed_at DESC NULLS LAST, b.updated_at DESC`, [res.locals.user.id],
       ),
     ]);
-    const commissionRatePercent = Number(settings.rows[0]?.value ?? 8);
-    res.json({ commissionRatePercent, transactions: transactions.rows });
+    const income = entries.rows.filter((entry) => entry.entry_type === "receita").reduce((sum, entry) => sum + Number(entry.amount), 0);
+    const expenses = entries.rows.filter((entry) => entry.entry_type === "despesa").reduce((sum, entry) => sum + Number(entry.amount), 0);
+    res.json({ entries: entries.rows, completedBookings: completedBookings.rows, totals: { income, expenses, balance: income - expenses } });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar a Carteira."); }
+});
+
+app.post("/api/wallet/entries", requireUser, async (req, res) => {
+  if (res.locals.user.role !== "profissional") return jsonError(res, 403, "O controle financeiro está disponível para contas profissionais.");
+  const entryType = String(req.body?.entryType || "");
+  const bookingId = req.body?.bookingId ? Number(req.body.bookingId) : null;
+  const description = String(req.body?.description || "").trim();
+  const amount = Number(req.body?.amount);
+  const paymentMethod = String(req.body?.paymentMethod || "").trim().slice(0, 40) || null;
+  if (!["receita", "despesa"].includes(entryType)) return jsonError(res, 400, "Tipo de lançamento inválido.");
+  if (entryType === "despesa" && (!description || description.length > 240 || !Number.isFinite(amount) || amount <= 0)) return jsonError(res, 400, "Informe uma descrição e um valor de despesa válido.");
+  if (entryType === "receita" && (!Number.isInteger(bookingId) || Number(bookingId) < 1)) return jsonError(res, 400, "Selecione um serviço concluído para registrar o recebimento.");
+  try {
+    if (entryType === "receita") {
+      const result = await pool.query(
+        `INSERT INTO wallet_entries (user_id, booking_id, entry_type, description, amount, payment_method, report_source, reported_by_user_id)
+         SELECT b.professional_id, b.id, 'receita', 'Serviço concluído: ' || COALESCE(sr.title, 'serviço'),
+           COALESCE(b.final_amount, b.agreed_amount), $3, 'profissional_confirmou', $1
+         FROM bookings b LEFT JOIN service_requests sr ON sr.id = b.request_id
+         WHERE b.id = $2 AND b.professional_id = $1 AND b.status = 'concluido'
+         ON CONFLICT DO NOTHING RETURNING *`, [res.locals.user.id, bookingId, paymentMethod],
+      );
+      if (!result.rows[0]) return jsonError(res, 409, "Recebimento já registrado ou serviço não pertence à sua conta.");
+      res.status(201).json({ entry: result.rows[0] });
+      return;
+    }
+    const result = await pool.query(
+      `INSERT INTO wallet_entries (user_id, entry_type, description, amount, payment_method, report_source, reported_by_user_id)
+       VALUES ($1, 'despesa', $2, $3, $4, 'lancamento_manual', $1) RETURNING *`,
+      [res.locals.user.id, description, amount, paymentMethod],
+    );
+    res.status(201).json({ entry: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível registrar este lançamento."); }
 });
 
 app.put("/api/admin/platform-settings/commission", requireAdmin, async (req, res) => {
@@ -1356,31 +1491,25 @@ app.put("/api/admin/platform-settings/commission", requireAdmin, async (req, res
 });
 
 app.post("/api/reviews", requireUser, async (req, res) => {
-  const { professionalId, userId, bookingId, requestId, rating, comment } = req.body || {};
-  const targetId = Number(userId || professionalId);
-  if (!["usuario", "profissional"].includes(res.locals.user.role)) return jsonError(res, 403, "Sua conta não pode avaliar perfis.");
-  if (!Number.isInteger(targetId) || targetId < 1 || !Number.isInteger(Number(rating)) || Number(rating) < 1 || Number(rating) > 5) return jsonError(res, 400, "Selecione um perfil e uma nota entre 1 e 5.");
+  const { professionalId, bookingId, rating, comment } = req.body || {};
+  const targetId = Number(professionalId);
+  if (res.locals.user.role !== "usuario") return jsonError(res, 403, "Somente o cliente que contratou o serviço pode avaliar o profissional.");
+  if (!Number.isInteger(Number(bookingId)) || Number(bookingId) < 1 || !Number.isInteger(targetId) || targetId < 1 || !Number.isInteger(Number(rating)) || Number(rating) < 1 || Number(rating) > 5) return jsonError(res, 400, "Selecione o serviço e uma nota entre 1 e 5.");
   if (comment != null && String(comment).length > 2000) return jsonError(res, 400, "O comentário deve ter até 2.000 caracteres.");
   try {
-    const target = await pool.query("SELECT id, role FROM users WHERE id = $1 AND role IN ('usuario', 'profissional') AND is_active = TRUE", [targetId]);
-    if (!target.rows[0] || targetId === Number(res.locals.user.id)) return jsonError(res, 404, "Perfil não encontrado.");
-    const conversation = await pool.query(
-      "SELECT id FROM conversations WHERE (customer_id = $1 AND professional_id = $2) OR (customer_id = $2 AND professional_id = $1) LIMIT 1",
-      [res.locals.user.id, targetId],
-    );
-    if (!conversation.rows[0]) return jsonError(res, 403, "Só é possível avaliar alguém com quem você conversou pelo ManiService.");
-    const priorReview = await pool.query("SELECT id FROM reviews WHERE reviewer_id = $1 AND professional_id = $2 LIMIT 1", [res.locals.user.id, targetId]);
-    if (priorReview.rows[0]) return jsonError(res, 409, "Você já avaliou este perfil.");
+    const booking = await pool.query("SELECT id FROM bookings WHERE id = $1 AND customer_id = $2 AND professional_id = $3 AND status = 'concluido'", [bookingId, res.locals.user.id, targetId]);
+    if (!booking.rows[0]) return jsonError(res, 403, "A avaliação só fica disponível depois da conclusão confirmada de um serviço contratado por você.");
     const result = await pool.query(
-      "INSERT INTO reviews (reviewer_id, professional_id, booking_id, request_id, rating, comment) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-      [res.locals.user.id, targetId, bookingId || null, requestId || null, rating, comment ? String(comment).trim() : null],
+      "INSERT INTO reviews (reviewer_id, professional_id, booking_id, rating, comment) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+      [res.locals.user.id, targetId, bookingId, rating, comment ? String(comment).trim() : null],
     );
-    if (target.rows[0].role === "profissional") await pool.query(
+    await pool.query(
       `UPDATE professional_profiles pp SET rating = stats.rating, total_reviews = stats.total_reviews, updated_at = NOW()
        FROM (SELECT professional_id, ROUND(AVG(rating)::numeric, 1) AS rating, COUNT(*)::int AS total_reviews FROM reviews WHERE professional_id = $1 GROUP BY professional_id) stats
        WHERE pp.user_id = stats.professional_id`,
       [targetId],
     );
+    await notifyUser(targetId, "avaliacao_servico", "Nova avaliação de serviço", `${res.locals.user.name} avaliou um serviço concluído.`, `/perfil/${targetId}`).catch(() => undefined);
     res.status(201).json({ review: result.rows[0] });
   } catch (error) {
     console.error(error);
@@ -1455,12 +1584,17 @@ async function ensureRuntimeSchema() {
     ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS image_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
     UPDATE service_requests SET image_urls = jsonb_build_array(image_url) WHERE image_url IS NOT NULL AND image_urls = '[]'::jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS completion_image_url TEXT;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS final_amount NUMERIC(12,2);
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
     ALTER TABLE reports ADD COLUMN IF NOT EXISTS review_note TEXT;
     ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_check;
     ALTER TABLE reports ADD CONSTRAINT reports_check CHECK (reported_user_id IS NOT NULL OR post_id IS NOT NULL OR request_id IS NOT NULL OR message_id IS NOT NULL);
+    ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_status_check;
+    ALTER TABLE bookings ADD CONSTRAINT bookings_status_check
+      CHECK (status IN ('agendado', 'em_execucao', 'aguardando_confirmacao', 'concluido', 'em_disputa', 'cancelado'));
     CREATE TABLE IF NOT EXISTS report_events (
       id BIGSERIAL PRIMARY KEY,
       report_id BIGINT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
@@ -1484,6 +1618,29 @@ async function ensureRuntimeSchema() {
     CREATE INDEX IF NOT EXISTS profiles_location_idx ON profiles (latitude, longitude);
     CREATE INDEX IF NOT EXISTS notifications_unread_idx ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
     CREATE INDEX IF NOT EXISTS reports_message_idx ON reports (message_id) WHERE message_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS wallet_entries (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      booking_id BIGINT REFERENCES bookings(id) ON DELETE SET NULL,
+      entry_type VARCHAR(12) NOT NULL CHECK (entry_type IN ('receita', 'despesa')),
+      description VARCHAR(240) NOT NULL,
+      amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+      payment_method VARCHAR(40),
+      report_source VARCHAR(24) NOT NULL DEFAULT 'lancamento_manual'
+        CHECK (report_source IN ('cliente_confirmou', 'profissional_confirmou', 'lancamento_manual')),
+      reported_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+      occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS wallet_entries_booking_income_idx
+      ON wallet_entries (booking_id) WHERE entry_type = 'receita' AND booking_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS wallet_entries_user_date_idx ON wallet_entries (user_id, occurred_at DESC);
+    ALTER TABLE wallet_entries ENABLE ROW LEVEL SECURITY;
+    REVOKE ALL ON TABLE wallet_entries FROM PUBLIC;
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN REVOKE ALL ON TABLE wallet_entries FROM anon; END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN REVOKE ALL ON TABLE wallet_entries FROM authenticated; END IF;
+    END $$;
   `);
 }
 

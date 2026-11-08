@@ -262,6 +262,8 @@ CREATE TABLE IF NOT EXISTS bookings (
     CHECK (arrival_status IN ('agendado', 'a_caminho', 'cheguei')),
   professional_completed_at TIMESTAMPTZ,
   customer_confirmed_at TIMESTAMPTZ,
+  final_amount NUMERIC(12,2),
+  completion_image_url TEXT,
   payment_status VARCHAR(24) NOT NULL DEFAULT 'nao_iniciado'
     CHECK (payment_status IN ('nao_iniciado', 'aguardando_integracao', 'pendente', 'pago', 'problema', 'reembolsado')),
   issue_details TEXT,
@@ -284,6 +286,8 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS estimated_days INTEGER;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS arrival_status VARCHAR(20) NOT NULL DEFAULT 'agendado';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS professional_completed_at TIMESTAMPTZ;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_confirmed_at TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS final_amount NUMERIC(12,2);
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS completion_image_url TEXT;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_status VARCHAR(24) NOT NULL DEFAULT 'nao_iniciado';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_details TEXT;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reported_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
@@ -330,6 +334,35 @@ ALTER TABLE service_reminders DROP CONSTRAINT IF EXISTS service_reminders_label_
 ALTER TABLE service_reminders ADD CONSTRAINT service_reminders_label_check
   CHECK (label IN ('24_horas', '1_hora', 'fim_24_horas'));
 CREATE INDEX IF NOT EXISTS service_reminders_due_idx ON service_reminders (remind_at) WHERE notified_at IS NULL;
+
+-- Controle particular do profissional; registra valores declarados, sem processar pagamentos.
+CREATE TABLE IF NOT EXISTS wallet_entries (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  booking_id BIGINT REFERENCES bookings(id) ON DELETE SET NULL,
+  entry_type VARCHAR(12) NOT NULL CHECK (entry_type IN ('receita', 'despesa')),
+  description VARCHAR(240) NOT NULL,
+  amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  payment_method VARCHAR(40),
+  report_source VARCHAR(24) NOT NULL DEFAULT 'lancamento_manual'
+    CHECK (report_source IN ('cliente_confirmou', 'profissional_confirmou', 'lancamento_manual')),
+  reported_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS wallet_entries_booking_income_idx
+  ON wallet_entries (booking_id) WHERE entry_type = 'receita' AND booking_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS wallet_entries_user_date_idx ON wallet_entries (user_id, occurred_at DESC);
+ALTER TABLE wallet_entries ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE wallet_entries FROM PUBLIC;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON TABLE wallet_entries FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON TABLE wallet_entries FROM authenticated;
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS bookings_customer_idx
   ON bookings (customer_id, scheduled_at DESC);
