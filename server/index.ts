@@ -451,6 +451,7 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.last_login_at,
+        u.moderation_blocked_at, u.moderation_blocked_until, u.moderation_block_reason,
         p.city, p.state, COUNT(*) OVER()::int AS total_count
        FROM users u LEFT JOIN profiles p ON p.user_id = u.id
        WHERE ($1 = '' OR u.name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
@@ -469,6 +470,7 @@ app.get("/api/admin/users/:id", requireAdmin, async (req, res) => {
   try {
     const accountResult = await pool.query(
       `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.last_login_at,
+        u.moderation_blocked_at, u.moderation_blocked_until, u.moderation_block_reason,
         p.avatar_url, p.cover_url, p.bio, p.neighborhood, p.city, p.state, p.is_public,
         u.identity_verified,
         pp.specialty, pp.description AS professional_description, pp.verified, pp.rating,
@@ -507,6 +509,52 @@ app.get("/api/admin/users/:id", requireAdmin, async (req, res) => {
     }
     res.json({ account, posts: postsResult.rows, reviews: reviewsResult.rows, identityVerification });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar o perfil da conta."); }
+});
+
+app.post("/api/admin/users/:id/report-and-block", requireAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  const reason = String(req.body?.reason || "").trim();
+  const details = String(req.body?.details || "").trim();
+  if (!Number.isInteger(userId) || userId < 1) return jsonError(res, 400, "Conta inválida.");
+  if (userId === Number(res.locals.user.id)) return jsonError(res, 400, "Você não pode denunciar ou bloquear sua própria conta.");
+  if (!reportReasons.includes(reason)) return jsonError(res, 400, "Selecione um motivo válido para a denúncia.");
+  if (details.length < 10 || details.length > 2000) return jsonError(res, 400, "Descreva a evidência em pelo menos 10 e no máximo 2.000 caracteres.");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const target = await client.query("SELECT id, name, is_active FROM users WHERE id = $1 FOR UPDATE", [userId]);
+    if (!target.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 404, "Conta não encontrada."); }
+    if (!target.rows[0].is_active) { await client.query("ROLLBACK"); return jsonError(res, 409, "A conta já está inativa."); }
+    const report = await client.query(
+      `INSERT INTO reports (reporter_id, reported_user_id, reason, details, status, reviewed_by, reviewed_at, review_note)
+       VALUES ($1, $2, $3, $4, 'em_analise', $1, NOW(), $4) RETURNING id`,
+      [res.locals.user.id, userId, reason, details],
+    );
+    await client.query(
+      `INSERT INTO report_events (report_id, moderator_id, previous_status, new_status, note)
+       VALUES ($1, $2, 'aberta', 'em_analise', $3)`,
+      [report.rows[0].id, res.locals.user.id, `Denúncia criada pela administração a partir do perfil da conta. Evidência: ${details}`],
+    );
+    await client.query(
+      `UPDATE users SET moderation_blocked_at = COALESCE(moderation_blocked_at, NOW()),
+        moderation_blocked_until = NULL, moderation_block_reason = $2, moderation_action_note = $3
+       WHERE id = $1`,
+      [userId, reason, details],
+    );
+    await client.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
+    await client.query(
+      `INSERT INTO notifications (user_id, type, title, body, link)
+       VALUES ($1, 'moderacao_conta', 'Atualização da equipe ManiService',
+         'O acesso à sua conta foi restrito. Entre para enviar um recurso e acompanhar a revisão da equipe.', '/conta-bloqueada')`,
+      [userId],
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ ok: true, reportId: Number(report.rows[0].id) });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error(error);
+    jsonError(res, 500, "Não foi possível registrar a denúncia e bloquear a conta.");
+  } finally { client.release(); }
 });
 
 app.patch("/api/admin/users/:id/identity-verification", requireAdmin, async (req, res) => {
@@ -993,6 +1041,20 @@ app.post("/api/posts/:id/comments", requireUser, async (req, res) => {
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível publicar o comentário."); }
 });
 
+app.delete("/api/posts/:postId/comments/:commentId", requireUser, async (req, res) => {
+  const postId = Number(req.params.postId);
+  const commentId = Number(req.params.commentId);
+  if (!Number.isInteger(postId) || postId < 1 || !Number.isInteger(commentId) || commentId < 1) return jsonError(res, 400, "Comentário inválido.");
+  try {
+    const comment = await pool.query("SELECT id, user_id FROM post_comments WHERE id = $1 AND post_id = $2", [commentId, postId]);
+    if (!comment.rows[0]) return jsonError(res, 404, "Comentário não encontrado.");
+    if (Number(comment.rows[0].user_id) !== Number(res.locals.user.id) && res.locals.user.role !== "admin") return jsonError(res, 403, "Você só pode excluir seus próprios comentários.");
+    await pool.query("DELETE FROM post_comments WHERE id = $1 AND post_id = $2", [commentId, postId]);
+    const count = await pool.query("SELECT COUNT(*)::int AS count FROM post_comments WHERE post_id = $1", [postId]);
+    res.json({ ok: true, commentsCount: Number(count.rows[0].count) });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível excluir o comentário."); }
+});
+
 app.get("/api/conversations", requireUser, async (_req, res) => {
   try {
     const result = await pool.query(
@@ -1447,6 +1509,35 @@ app.get("/api/proposals", requireUser, async (req, res) => {
     console.error(error);
     jsonError(res, 500, "Não foi possível carregar os orçamentos.");
   }
+});
+
+app.post("/api/proposals/:id/reject", requireUser, async (req, res) => {
+  const proposalId = Number(req.params.id);
+  if (!Number.isInteger(proposalId) || proposalId < 1) return jsonError(res, 400, "Orçamento inválido.");
+  const client = await pool.connect();
+  let professionalId: number | undefined;
+  let title = "Pedido de serviço";
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `SELECT p.*, sr.user_id AS customer_id, sr.title
+       FROM proposals p JOIN service_requests sr ON sr.id = p.request_id
+       WHERE p.id = $1 FOR UPDATE OF sr, p`, [proposalId],
+    );
+    const proposal = result.rows[0];
+    if (!proposal || Number(proposal.customer_id) !== Number(res.locals.user.id)) { await client.query("ROLLBACK"); return jsonError(res, 404, "Orçamento não encontrado para sua conta."); }
+    if (!["enviado", "visualizado"].includes(String(proposal.status))) { await client.query("ROLLBACK"); return jsonError(res, 409, "Este orçamento não está mais disponível."); }
+    await client.query("UPDATE proposals SET status = 'recusado', updated_at = NOW() WHERE id = $1", [proposalId]);
+    professionalId = Number(proposal.professional_id);
+    title = String(proposal.title || title);
+    await client.query("COMMIT");
+    await notifyUser(professionalId, "orcamento_recusado", "Orçamento recusado", `${res.locals.user.name} recusou seu orçamento para ${title}.`, "/painel").catch((error) => console.error("Não foi possível notificar sobre a recusa:", error));
+    res.json({ ok: true });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error(error);
+    jsonError(res, 500, "Não foi possível recusar este orçamento.");
+  } finally { client.release(); }
 });
 
 app.post("/api/proposals/:id/accept", requireUser, async (req, res) => {

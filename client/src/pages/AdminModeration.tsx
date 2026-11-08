@@ -40,7 +40,11 @@ export default function AdminModeration() {
 
   async function update(report: CaseRow, status: string) {
     setWorkingId(Number(report.id));
-    try { await api.updateAdminReport(Number(report.id), status, notes[report.id] || ""); toast.success("Análise registrada."); await load(); }
+    try {
+      await api.updateAdminReport(Number(report.id), status, notes[report.id] || "");
+      toast.success(status === "ignorada" ? "Denúncia encerrada sem ação e movida para Arquivadas." : status === "resolvida" ? "Análise concluída e movida para Arquivadas." : "Denúncia marcada em análise.");
+      await load();
+    }
     catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível salvar a análise."); }
     finally { setWorkingId(null); }
   }

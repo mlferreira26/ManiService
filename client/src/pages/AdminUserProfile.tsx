@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Eye, EyeOff, MapPin, MessageCircle, MessageSquareText, ShieldCheck, Star, Users } from "lucide-react";
+import { ArrowLeft, Eye, EyeOff, MapPin, MessageCircle, MessageSquareText, ShieldAlert, ShieldCheck, Star, Users } from "lucide-react";
 import { Link, useLocation, useRoute } from "wouter";
 import { toast } from "sonner";
 import SiteHeader from "@/components/SiteHeader";
@@ -23,6 +23,9 @@ export default function AdminUserProfile() {
   const [startingChat, setStartingChat] = useState(false);
   const [reviewingIdentity, setReviewingIdentity] = useState(false);
   const [identityNote, setIdentityNote] = useState("");
+  const [reportReason, setReportReason] = useState("Conteúdo impróprio");
+  const [reportDetails, setReportDetails] = useState("");
+  const [reportingAndBlocking, setReportingAndBlocking] = useState(false);
 
   useEffect(() => {
     const id = Number(params?.id);
@@ -54,6 +57,18 @@ export default function AdminUserProfile() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível revisar a identidade."); }
     finally { setReviewingIdentity(false); }
   }
+  async function reportAndBlockAccount() {
+    if (!account || reportingAndBlocking || !reportDetails.trim()) return;
+    if (!window.confirm(`Registrar denúncia e bloquear a conta de ${account.name}? A pessoa perderá as sessões ativas e poderá enviar um recurso.`)) return;
+    setReportingAndBlocking(true);
+    try {
+      await api.adminReportAndBlockUser(Number(account.id), reportReason, reportDetails.trim());
+      setDetail(await api.adminUser(Number(account.id)));
+      setReportDetails("");
+      toast.success("Denúncia registrada e conta bloqueada. O caso está na fila de análise.");
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível denunciar e bloquear esta conta."); }
+    finally { setReportingAndBlocking(false); }
+  }
   return <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100"><SiteHeader /><main className="container max-w-5xl space-y-6 py-8 md:py-10">
     <Button asChild variant="ghost" className="-ml-3"><Link href="/admin/pessoas"><ArrowLeft className="mr-2 h-4 w-4" />Voltar para pessoas</Link></Button>
     {user?.role !== "admin" ? <Card><CardContent className="p-8 text-center">Esta área é exclusiva da administração do ManiService.</CardContent></Card> : loading ? <Card><CardContent className="p-10 text-center text-muted-foreground">Carregando perfil...</CardContent></Card> : !account ? <Card><CardContent className="p-10 text-center">Não foi possível encontrar esta conta.</CardContent></Card> : <>
@@ -68,6 +83,15 @@ export default function AdminUserProfile() {
           {account.bio && <p className="mt-5 whitespace-pre-wrap text-sm leading-6">{account.bio}</p>}
           {account.role === "profissional" && <div className="mt-5 rounded-xl bg-slate-50 p-4"><div className="flex flex-wrap items-center gap-2"><h2 className="font-semibold">{account.specialty || "Especialidade não informada"}</h2>{account.verified && <Badge className="bg-green-100 text-green-800"><ShieldCheck className="mr-1 h-3 w-3" />Verificado</Badge>}</div>{account.professional_description && <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{account.professional_description}</p>}</div>}
           <div className="mt-5 flex flex-wrap items-center gap-3 text-sm"><span className="rounded-lg bg-slate-50 px-3 py-2"><Users className="mr-1 inline h-4 w-4 text-primary" />{account.followers_count || 0} seguidores · {account.following_count || 0} seguindo</span>{account.role === "profissional" && <span className="rounded-lg bg-slate-50 px-3 py-2"><Star className="mr-1 inline h-4 w-4 text-amber-500" />{Number(account.rating || 0).toFixed(1)} · {account.total_reviews || 0} avaliações · {account.total_services || 0} serviços</span>}{account.is_active && Number(account.id) !== Number(user?.id) && <Button size="sm" onClick={() => void contactAccount()} disabled={startingChat}><MessageCircle className="mr-2 h-4 w-4" />{startingChat ? "Abrindo conversa..." : "Contatar pela equipe"}</Button>}</div>
+          {Number(account.id) !== Number(user?.id) && <div className="mt-5 rounded-xl border border-red-200 bg-red-50/70 p-4">
+            <div className="flex items-start gap-2"><ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-red-700" /><div><h2 className="font-semibold text-red-900">Denunciar e bloquear conta</h2><p className="mt-1 text-sm text-red-800">Registra um caso para análise, bloqueia o acesso e encerra as sessões ativas. A pessoa poderá enviar um recurso.</p></div></div>
+            {account.moderation_blocked_at && <p className="mt-3 text-sm font-medium text-red-900">Conta bloqueada{account.moderation_blocked_until ? ` até ${dateLabel(account.moderation_blocked_until)}` : " sem prazo definido"}.</p>}
+            <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)]">
+              <label className="space-y-1 text-sm font-medium">Motivo da denúncia<select value={reportReason} onChange={(event) => setReportReason(event.target.value)} className="h-10 w-full rounded-md border bg-white px-3"><option>Suspeita de golpe ou fraude</option><option>Pedido de pagamento fora da plataforma</option><option>Perfil ou identidade falsa</option><option>Assédio, ameaça ou discriminação</option><option>Spam ou anúncio enganoso</option><option>Conteúdo impróprio</option><option>Outro</option></select></label>
+              <label className="space-y-1 text-sm font-medium">Descreva a evidência<textarea value={reportDetails} onChange={(event) => setReportDetails(event.target.value)} maxLength={2000} rows={3} className="w-full rounded-md border bg-white px-3 py-2" placeholder="Explique o que encontrou no perfil ou por que a conta deve ser revisada." /></label>
+            </div>
+            <Button variant="destructive" className="mt-3" disabled={!account.is_active || reportingAndBlocking || reportDetails.trim().length < 10} onClick={() => void reportAndBlockAccount()}><ShieldAlert className="mr-2 h-4 w-4" />{reportingAndBlocking ? "Registrando e bloqueando..." : "Registrar denúncia e bloquear"}</Button>
+          </div>}
         </CardContent>
       </Card>
       <section><div className="mb-3"><h2 className="text-xl font-bold">Verificação de identidade</h2><p className="text-sm text-muted-foreground">CPF e data de nascimento são privados e aparecem nesta ficha somente para administradores.</p></div><Card><CardContent className="space-y-4 p-5">{!detail.identityVerification ? <p className="text-sm text-muted-foreground">Esta pessoa ainda não enviou dados para verificação.</p> : <><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{detail.identityVerification.status === "pendente" ? "Em análise" : detail.identityVerification.status === "verificada" ? "Verificada" : "Correção solicitada"}</Badge><span className="text-xs text-muted-foreground">Enviada em {dateLabel(detail.identityVerification.submitted_at)}</span></div>{detail.identityVerification.cpf && <div className="grid gap-3 sm:grid-cols-2"><div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-muted-foreground">CPF informado</p><p className="mt-1 font-medium">{String(detail.identityVerification.cpf).replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4")}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-muted-foreground">Data de nascimento</p><p className="mt-1 font-medium">{new Date(`${detail.identityVerification.birthDate}T00:00:00`).toLocaleDateString("pt-BR")}</p></div></div>}{detail.identityVerification.admin_note && <p className="rounded-lg bg-amber-50 p-3 text-sm">Observação: {detail.identityVerification.admin_note}</p>}{detail.identityVerification.status === "pendente" && <><div className="space-y-2"><label htmlFor="identity-review-note" className="text-sm font-medium">Observação (obrigatória para pedir correção)</label><textarea id="identity-review-note" value={identityNote} onChange={(event) => setIdentityNote(event.target.value)} maxLength={1000} rows={3} className="w-full rounded-md border bg-background px-3 py-2 text-sm" placeholder="Explique o que precisa ser corrigido" /></div><div className="flex flex-wrap gap-2"><Button disabled={reviewingIdentity} onClick={() => void reviewIdentity("verificada")}><ShieldCheck className="mr-2 h-4 w-4" />Aprovar verificação</Button><Button variant="outline" disabled={reviewingIdentity || identityNote.trim().length < 5} onClick={() => void reviewIdentity("ajuste_solicitado")}>{reviewingIdentity ? "Salvando..." : "Solicitar correção"}</Button></div></>}</>}</CardContent></Card></section>
