@@ -1147,7 +1147,6 @@ app.get("/api/proposals", requireUser, async (req, res) => {
 });
 
 app.post("/api/proposals/:id/accept", requireUser, async (req, res) => {
-  if (res.locals.user.role !== "usuario") return jsonError(res, 403, "Somente o cliente que publicou o pedido pode aceitar o orçamento.");
   const proposalId = Number(req.params.id);
   if (!Number.isInteger(proposalId) || proposalId < 1) return jsonError(res, 400, "Orçamento inválido.");
   const client = await pool.connect();
