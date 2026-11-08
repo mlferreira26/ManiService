@@ -1762,7 +1762,6 @@ app.put("/api/admin/platform-settings/commission", requireAdmin, async (req, res
 app.post("/api/reviews", requireUser, async (req, res) => {
   const { professionalId, bookingId, rating, comment } = req.body || {};
   const targetId = Number(professionalId);
-  if (res.locals.user.role !== "usuario") return jsonError(res, 403, "Somente o cliente que contratou o serviço pode avaliar o profissional.");
   if (!Number.isInteger(Number(bookingId)) || Number(bookingId) < 1 || !Number.isInteger(targetId) || targetId < 1 || !Number.isInteger(Number(rating)) || Number(rating) < 1 || Number(rating) > 5) return jsonError(res, 400, "Selecione o serviço e uma nota entre 1 e 5.");
   if (comment != null && String(comment).length > 2000) return jsonError(res, 400, "O comentário deve ter até 2.000 caracteres.");
   try {
