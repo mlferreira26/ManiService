@@ -47,9 +47,9 @@ export default function ActivityFeed() {
   return <div className="min-h-screen bg-gradient-to-br from-slate-200 via-blue-50 to-slate-100 text-slate-900">
     <SiteHeader />
     <main className="container max-w-[1500px] py-6 md:py-9">
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div><p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-700"><BriefcaseBusiness className="h-4 w-4" /> ManiService em movimento</p><h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">Comunidade</h1><p className="mt-2 max-w-2xl text-sm text-muted-foreground md:text-base">Acompanhe o que está acontecendo, conheça profissionais e veja trabalhos feitos na sua região.</p></div>
-        <Link href="/comunidades"><a><Button className="rounded-xl">Publicar pedido <ArrowRight className="ml-2 h-4 w-4" /></Button></a></Link>
+      <div className="relative mb-4 flex flex-col items-center gap-3 sm:min-h-10 sm:flex-row sm:justify-center">
+        <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-700"><BriefcaseBusiness className="h-4 w-4" /> ManiService em movimento</p>
+        <Link href="/comunidades"><a className="sm:absolute sm:right-0"><Button className="rounded-xl">Publicar pedido <ArrowRight className="ml-2 h-4 w-4" /></Button></a></Link>
       </div>
 
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(15rem,0.85fr)_minmax(28rem,1.55fr)_minmax(17rem,0.9fr)]">
