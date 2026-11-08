@@ -9,6 +9,8 @@ ALTER TABLE public.bookings
   ADD COLUMN IF NOT EXISTS arrival_status VARCHAR(20) NOT NULL DEFAULT 'agendado',
   ADD COLUMN IF NOT EXISTS professional_completed_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS customer_confirmed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS completion_image_url TEXT,
+  ADD COLUMN IF NOT EXISTS final_amount NUMERIC(12,2),
   ADD COLUMN IF NOT EXISTS payment_status VARCHAR(24) NOT NULL DEFAULT 'nao_iniciado',
   ADD COLUMN IF NOT EXISTS issue_details TEXT,
   ADD COLUMN IF NOT EXISTS issue_reported_by BIGINT REFERENCES public.users(id) ON DELETE SET NULL,

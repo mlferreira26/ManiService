@@ -552,7 +552,10 @@ app.get("/api/health", async (_req, res) => {
 
 app.post("/api/auth/register", async (req, res) => {
   const { name, email, password, role, specialty } = req.body || {};
-  if (!name || !email || !password || !["usuario", "profissional"].includes(role)) return jsonError(res, 400, "Nome, e-mail, senha e perfil são obrigatórios.");
+  const city = String(req.body?.city || "").trim();
+  const state = String(req.body?.state || "").trim().toUpperCase();
+  if (!name || !email || !password || !city || !["usuario", "profissional"].includes(role)) return jsonError(res, 400, "Nome, e-mail, senha, cidade e perfil são obrigatórios.");
+  if (city.length > 100 || (state && !/^[A-Z]{2}$/.test(state))) return jsonError(res, 400, "Confira a cidade e a sigla do estado.");
   if (String(password).length < 8) return jsonError(res, 400, "A senha precisa ter pelo menos 8 caracteres.");
   const normalizedEmail = String(email).trim().toLowerCase();
   let client;
@@ -565,7 +568,7 @@ app.post("/api/auth/register", async (req, res) => {
       [String(name).trim(), normalizedEmail, passwordHash, role],
     );
     const user = userResult.rows[0];
-    await client.query("INSERT INTO profiles (user_id) VALUES ($1)", [user.id]);
+    await client.query("INSERT INTO profiles (user_id, city, state) VALUES ($1, $2, $3)", [user.id, city, state || null]);
     if (role === "profissional") {
       await client.query("INSERT INTO professional_profiles (user_id, specialty) VALUES ($1, $2)", [user.id, specialty || "Serviços gerais"]);
     }
@@ -1566,6 +1569,12 @@ app.post("/api/bookings/:id/complete", requireUser, async (req, res) => {
     }
     if (code === "42703" || code === "42P01") {
       return jsonError(res, 503, "O banco está sem uma coluna ou tabela necessária para concluir serviços. Atualize a migração de acompanhamento no Supabase.");
+    }
+    if (code === "23503" || code === "23502") {
+      return jsonError(res, 503, "O banco ainda não está totalmente atualizado para concluir serviços. Aplique a migração de acompanhamento no Supabase e tente novamente.");
+    }
+    if (code === "22P02" || code === "22003") {
+      return jsonError(res, 400, "O valor final informado não é válido. Confira o valor e tente novamente.");
     }
     jsonError(res, 500, "Não foi possível concluir o serviço.");
   } finally { client.release(); }

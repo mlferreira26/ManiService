@@ -22,7 +22,7 @@ export default function Account() {
   const [created, setCreated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ name: "", email: "", password: "", specialty: "" });
+  const [form, setForm] = useState({ name: "", email: "", password: "", specialty: "", city: "", state: "" });
   const current = roles.find((item) => item.id === role)!;
 
   async function submit(event: FormEvent) {
@@ -86,6 +86,7 @@ export default function Account() {
                     <div className="space-y-2"><Label htmlFor="name">Nome completo</Label><Input id="name" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ex.: Marina Oliveira" /></div>
                     <div className="space-y-2"><Label htmlFor="email">E-mail</Label><Input id="email" required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="voce@email.com" /></div>
                     <div className="space-y-2"><Label htmlFor="password">Senha</Label><Input id="password" required minLength={8} type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Mínimo de 8 caracteres" /></div>
+                    <div className="grid gap-4 sm:grid-cols-[1fr_120px]"><div className="space-y-2"><Label htmlFor="city">Cidade</Label><Input id="city" required maxLength={100} autoComplete="address-level2" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} placeholder="Ex.: Toledo" /></div><div className="space-y-2"><Label htmlFor="state">UF</Label><Input id="state" maxLength={2} autoComplete="address-level1" value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value.toUpperCase().replace(/[^A-Z]/g, "") })} placeholder="PR" /></div></div>
                     {role === "profissional" && <div className="space-y-2"><Label htmlFor="service">Especialidade principal</Label><Input id="service" value={form.specialty} onChange={(e) => setForm({ ...form, specialty: e.target.value })} placeholder="Ex.: elétrica residencial" /></div>}
                     {error && <p className="rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
                     <Button disabled={loading} className="mt-2 w-full" type="submit">{loading ? "Salvando..." : "Criar conta"} <ArrowRight className="ml-2 h-4 w-4" /></Button>

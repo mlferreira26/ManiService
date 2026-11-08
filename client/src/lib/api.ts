@@ -12,7 +12,7 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string }) => request<{ user: { id: number; name: string; email: string; role: string } }>("/api/auth/register", { method: "POST", body: JSON.stringify(payload) }),
+  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string; city: string; state?: string }) => request<{ user: { id: number; name: string; email: string; role: string } }>("/api/auth/register", { method: "POST", body: JSON.stringify(payload) }),
   login: (payload: { email: string; password: string }) => request<{ user: { id: number; name: string; email: string; role: string; isModerationBlocked?: boolean; moderationBlockedUntil?: string | null; moderationBlockReason?: string | null } }>("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   me: () => request<{ user: { id: number; name: string; email: string; role: string; isModerationBlocked?: boolean; moderationBlockedUntil?: string | null; moderationBlockReason?: string | null } }>("/api/auth/me"),
