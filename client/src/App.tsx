@@ -24,6 +24,8 @@ import ActivityFeed from "./pages/ActivityFeed";
 import AdminModeration from "./pages/AdminModeration";
 import AdminUsers from "./pages/AdminUsers";
 import AdminUserProfile from "./pages/AdminUserProfile";
+import ServicesTracking from "./pages/ServicesTracking";
+import Wallet from "./pages/Wallet";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -67,6 +69,8 @@ function Router() {
     <Route path="/mensagens"><Guarded><Messages /></Guarded></Route>
     <Route path="/configuracoes"><Guarded><AccountSettings /></Guarded></Route>
     <Route path="/servicos"><Guarded><ActivityFeed /></Guarded></Route>
+    <Route path="/servicos/acompanhar"><Guarded><ServicesTracking /></Guarded></Route>
+    <Route path="/carteira"><Guarded><Wallet /></Guarded></Route>
     <Route path="/admin/denuncias"><Guarded><AdminModeration /></Guarded></Route>
     <Route path="/admin/pessoas"><Guarded><AdminUsers /></Guarded></Route>
     <Route path="/admin/pessoas/:id"><Guarded><AdminUserProfile /></Guarded></Route>

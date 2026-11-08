@@ -203,7 +203,7 @@ export default function Contato() {
               {
                 pergunta: "Como funciona o pagamento?",
                 resposta:
-                  "O pagamento protegido pelo PagSeguro está sendo configurado. Quando estiver disponível, o valor ficará retido pelo provedor e será liberado ao profissional depois que você confirmar a conclusão do serviço. A comissão da plataforma será de 4% do orçamento e será descontada do repasse ao profissional.",
+                  "O pagamento será feito pelo Mercado Pago depois que o profissional concluir o serviço e o cliente confirmar. A comissão do ManiService está configurada inicialmente em 8%; taxas e cobrança só serão exibidas quando a integração do Mercado Pago estiver ativa. O ManiService não retém o dinheiro.",
               },
               {
                 pergunta: "Como reportar um problema?",

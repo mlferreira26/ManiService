@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   amount NUMERIC(12,2) NOT NULL CHECK (amount >= 0),
   message TEXT NOT NULL,
   estimated_days INTEGER CHECK (estimated_days IS NULL OR estimated_days > 0),
+  available_start_at TIMESTAMPTZ,
   status VARCHAR(20) NOT NULL DEFAULT 'enviado'
     CHECK (status IN ('enviado', 'visualizado', 'aceito', 'recusado', 'cancelado')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -256,13 +257,79 @@ CREATE TABLE IF NOT EXISTS bookings (
   customer_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   professional_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   scheduled_at TIMESTAMPTZ,
+  estimated_days INTEGER CHECK (estimated_days IS NULL OR estimated_days > 0),
+  arrival_status VARCHAR(20) NOT NULL DEFAULT 'agendado'
+    CHECK (arrival_status IN ('agendado', 'a_caminho', 'cheguei')),
+  professional_completed_at TIMESTAMPTZ,
+  customer_confirmed_at TIMESTAMPTZ,
+  payment_status VARCHAR(24) NOT NULL DEFAULT 'nao_iniciado'
+    CHECK (payment_status IN ('nao_iniciado', 'aguardando_integracao', 'pendente', 'pago', 'problema', 'reembolsado')),
+  issue_details TEXT,
+  issue_reported_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  issue_review_status VARCHAR(20) NOT NULL DEFAULT 'aberta'
+    CHECK (issue_review_status IN ('aberta', 'em_analise', 'resolvida', 'ignorada')),
+  issue_review_note TEXT,
+  issue_reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  issue_reviewed_at TIMESTAMPTZ,
   agreed_amount NUMERIC(12,2) NOT NULL CHECK (agreed_amount >= 0),
   status VARCHAR(20) NOT NULL DEFAULT 'agendado'
-    CHECK (status IN ('agendado', 'em_execucao', 'concluido', 'cancelado')),
+    CHECK (status IN ('agendado', 'em_execucao', 'aguardando_confirmacao', 'concluido', 'em_disputa', 'cancelado')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CHECK (customer_id <> professional_id)
 );
+
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS available_start_at TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS estimated_days INTEGER;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS arrival_status VARCHAR(20) NOT NULL DEFAULT 'agendado';
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS professional_completed_at TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_confirmed_at TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_status VARCHAR(24) NOT NULL DEFAULT 'nao_iniciado';
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_details TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reported_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_review_status VARCHAR(20) NOT NULL DEFAULT 'aberta';
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_review_note TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS issue_reviewed_at TIMESTAMPTZ;
+
+-- Configuração financeira e trilha de pagamentos. Registra estados/valores; não guarda saldo nem custodia fundos.
+CREATE TABLE IF NOT EXISTS platform_settings (
+  key VARCHAR(80) PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO platform_settings (key, value) VALUES ('commission_rate_percent', '8'::jsonb)
+  ON CONFLICT (key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS payment_transactions (
+  id BIGSERIAL PRIMARY KEY,
+  booking_id BIGINT NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  provider VARCHAR(40) NOT NULL DEFAULT 'mercado_pago',
+  provider_payment_id VARCHAR(180) UNIQUE,
+  gross_amount NUMERIC(12,2) NOT NULL CHECK (gross_amount >= 0),
+  commission_rate NUMERIC(5,2) NOT NULL CHECK (commission_rate >= 0 AND commission_rate <= 100),
+  platform_fee NUMERIC(12,2) NOT NULL CHECK (platform_fee >= 0),
+  processing_fee NUMERIC(12,2) CHECK (processing_fee IS NULL OR processing_fee >= 0),
+  professional_net NUMERIC(12,2) CHECK (professional_net IS NULL OR professional_net >= 0),
+  status VARCHAR(24) NOT NULL DEFAULT 'aguardando_integracao'
+    CHECK (status IN ('aguardando_integracao', 'pendente', 'pago', 'falhou', 'reembolsado', 'em_disputa')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS payment_transactions_status_idx ON payment_transactions (status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS service_reminders (
+  id BIGSERIAL PRIMARY KEY,
+  booking_id BIGINT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  remind_at TIMESTAMPTZ NOT NULL,
+  label VARCHAR(20) NOT NULL CHECK (label IN ('24_horas', '1_hora', 'fim_24_horas')),
+  notified_at TIMESTAMPTZ,
+  UNIQUE (booking_id, label)
+);
+ALTER TABLE service_reminders DROP CONSTRAINT IF EXISTS service_reminders_label_check;
+ALTER TABLE service_reminders ADD CONSTRAINT service_reminders_label_check
+  CHECK (label IN ('24_horas', '1_hora', 'fim_24_horas'));
+CREATE INDEX IF NOT EXISTS service_reminders_due_idx ON service_reminders (remind_at) WHERE notified_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS bookings_customer_idx
   ON bookings (customer_id, scheduled_at DESC);
@@ -330,6 +397,18 @@ CREATE TABLE IF NOT EXISTS report_events (
 
 CREATE INDEX IF NOT EXISTS report_events_report_created_idx
   ON report_events (report_id, created_at ASC);
+
+ALTER TABLE report_events ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE report_events FROM PUBLIC;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON TABLE report_events FROM anon';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'REVOKE ALL ON TABLE report_events FROM authenticated';
+  END IF;
+END $$;
 
 -- =========================================================
 -- Notificações e sessões
@@ -422,7 +501,7 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 -- =========================================================
 -- Views úteis para leitura do perfil profissional
 -- =========================================================
-CREATE OR REPLACE VIEW professional_profile_summary AS
+CREATE OR REPLACE VIEW professional_profile_summary WITH (security_invoker = true) AS
 SELECT
   u.id AS user_id,
   u.name,
@@ -453,6 +532,17 @@ GROUP BY
   p.avatar_url, p.cover_url, p.bio, p.address_line,
   p.neighborhood, p.city, p.state,
   pp.specialty, pp.verified;
+
+REVOKE ALL ON TABLE professional_profile_summary FROM PUBLIC;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON TABLE professional_profile_summary FROM anon';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'REVOKE ALL ON TABLE professional_profile_summary FROM authenticated';
+  END IF;
+END $$;
 
 -- =========================================================
 -- Usuário administrador inicial opcional

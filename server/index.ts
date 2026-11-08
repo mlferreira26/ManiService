@@ -110,8 +110,34 @@ async function notifyUser(userId: number | string, type: string, title: string, 
   );
 }
 
+async function processServiceReminders() {
+  await pool.query(
+    `WITH due AS (
+       UPDATE service_reminders SET notified_at = NOW()
+       WHERE id IN (
+         SELECT r.id FROM service_reminders r JOIN bookings b ON b.id = r.booking_id
+         WHERE r.notified_at IS NULL AND r.remind_at <= NOW() AND b.status IN ('agendado', 'em_execucao')
+         ORDER BY r.remind_at LIMIT 100 FOR UPDATE OF r SKIP LOCKED
+       )
+       RETURNING booking_id, label
+     ), recipients AS (
+       SELECT d.label, b.customer_id AS user_id, sr.title
+       FROM due d JOIN bookings b ON b.id = d.booking_id JOIN service_requests sr ON sr.id = b.request_id
+       UNION ALL
+       SELECT d.label, b.professional_id AS user_id, sr.title
+       FROM due d JOIN bookings b ON b.id = d.booking_id JOIN service_requests sr ON sr.id = b.request_id
+     )
+     INSERT INTO notifications (user_id, type, title, body, link)
+     SELECT user_id, 'lembrete_servico', 'Lembrete de serviço',
+       CASE label WHEN '24_horas' THEN 'O serviço ' || title || ' começa nas próximas 24 horas.' WHEN 'fim_24_horas' THEN 'A previsão de término do serviço ' || title || ' é nas próximas 24 horas. Combine a conclusão com o cliente.' ELSE 'O serviço ' || title || ' começa daqui a aproximadamente 1 hora.' END,
+       '/servicos/acompanhar'
+     FROM recipients`,
+  );
+}
+
 app.get("/api/notifications", requireUser, async (_req, res) => {
   try {
+    await processServiceReminders();
     const result = await pool.query(
       `SELECT id, type, title, body, link, read_at, created_at
        FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 30`,
@@ -1030,7 +1056,6 @@ app.post("/api/service-requests", requireUser, async (req, res) => {
 });
 
 app.delete("/api/service-requests/:id", requireUser, async (req, res) => {
-  if (res.locals.user.role !== "usuario") return jsonError(res, 403, "Somente quem publicou o pedido pode removê-lo.");
   const requestId = Number(req.params.id);
   if (!Number.isInteger(requestId) || requestId < 1) return jsonError(res, 400, "Pedido inválido.");
   try {
@@ -1041,7 +1066,7 @@ app.delete("/api/service-requests/:id", requireUser, async (req, res) => {
        RETURNING sr.id`,
       [requestId, res.locals.user.id],
     );
-    if (!result.rows[0]) return jsonError(res, 409, "Este pedido não pode ser removido porque não está mais aberto ou já tem serviço contratado.");
+    if (!result.rows[0]) return jsonError(res, 409, "Só é possível remover seu próprio pedido enquanto ele estiver aberto e sem serviço contratado.");
     res.json({ ok: true });
   } catch (error) {
     console.error(error);
@@ -1059,33 +1084,14 @@ app.post("/api/service-requests/:id/interest", requireProfessional, async (req, 
   }
 });
 
-app.delete("/api/service-requests/:id", requireUser, async (req, res) => {
-  if (res.locals.user.role !== "usuario") return jsonError(res, 403, "Somente quem publicou o pedido pode removê-lo.");
-  const requestId = Number(req.params.id);
-  if (!Number.isInteger(requestId) || requestId < 1) return jsonError(res, 400, "Pedido inválido.");
-  try {
-    const result = await pool.query(
-      `DELETE FROM service_requests sr
-       WHERE sr.id = $1 AND sr.user_id = $2 AND sr.status IN ('aberto', 'em_analise')
-         AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.request_id = sr.id AND b.status <> 'cancelado')
-       RETURNING sr.id`,
-      [requestId, res.locals.user.id],
-    );
-    if (!result.rows[0]) return jsonError(res, 409, "Este pedido não pode ser removido. Confira se ainda está aberto e sem serviço contratado.");
-    res.json({ ok: true });
-  } catch (error) {
-    console.error(error);
-    jsonError(res, 500, "Não foi possível remover o pedido.");
-  }
-});
-
 app.post("/api/service-requests/:id/proposals", requireProfessional, async (req, res) => {
   const requestId = Number(req.params.id);
   const amount = Number(req.body?.amount);
   const message = String(req.body?.message || "").trim();
   const estimatedDays = req.body?.estimatedDays ? Number(req.body.estimatedDays) : null;
+  const availableStartAt = new Date(String(req.body?.availableStartAt || ""));
   if (!Number.isInteger(requestId) || requestId < 1) return jsonError(res, 400, "Pedido inválido.");
-  if (!Number.isFinite(amount) || amount <= 0 || !message) return jsonError(res, 400, "Informe um valor válido e uma mensagem.");
+  if (!Number.isFinite(amount) || amount <= 0 || !message || Number.isNaN(availableStartAt.getTime()) || availableStartAt.getTime() <= Date.now()) return jsonError(res, 400, "Informe valor, mensagem e uma data futura para começar.");
   if (message.length > 5000 || (estimatedDays !== null && (!Number.isInteger(estimatedDays) || estimatedDays < 1))) return jsonError(res, 400, "Confira a mensagem e o prazo informado.");
   const client = await pool.connect();
   try {
@@ -1095,12 +1101,12 @@ app.post("/api/service-requests/:id/proposals", requireProfessional, async (req,
     if (!serviceRequest) { await client.query("ROLLBACK"); return jsonError(res, 404, "Pedido não encontrado ou indisponível."); }
     if (Number(serviceRequest.user_id) === Number(res.locals.user.id)) { await client.query("ROLLBACK"); return jsonError(res, 400, "Você não pode enviar proposta para seu próprio pedido."); }
     const result = await client.query(
-      `INSERT INTO proposals (request_id, professional_id, amount, message, estimated_days)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO proposals (request_id, professional_id, amount, message, estimated_days, available_start_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (request_id, professional_id)
-       DO UPDATE SET amount = EXCLUDED.amount, message = EXCLUDED.message, estimated_days = EXCLUDED.estimated_days, status = 'enviado', updated_at = NOW()
+       DO UPDATE SET amount = EXCLUDED.amount, message = EXCLUDED.message, estimated_days = EXCLUDED.estimated_days, available_start_at = EXCLUDED.available_start_at, status = 'enviado', updated_at = NOW()
        RETURNING *`,
-      [requestId, res.locals.user.id, amount, message, estimatedDays],
+      [requestId, res.locals.user.id, amount, message, estimatedDays, availableStartAt.toISOString()],
     );
     const conversationResult = await client.query(
       `WITH existing AS (
@@ -1141,15 +1147,68 @@ app.get("/api/proposals", requireUser, async (req, res) => {
 });
 
 app.post("/api/proposals/:id/accept", requireUser, async (req, res) => {
-  jsonError(res, 503, "O aceite com pagamento retido ainda não está configurado.");
+  if (res.locals.user.role !== "usuario") return jsonError(res, 403, "Somente o cliente que publicou o pedido pode aceitar o orçamento.");
+  const proposalId = Number(req.params.id);
+  if (!Number.isInteger(proposalId) || proposalId < 1) return jsonError(res, 400, "Orçamento inválido.");
+  const client = await pool.connect();
+  let booking: Record<string, any> | undefined;
+  let professionalId: number | undefined;
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `SELECT p.*, sr.user_id AS customer_id, sr.title
+       FROM proposals p JOIN service_requests sr ON sr.id = p.request_id
+       WHERE p.id = $1 FOR UPDATE OF sr, p`, [proposalId],
+    );
+    const proposal = result.rows[0];
+    if (!proposal || Number(proposal.customer_id) !== Number(res.locals.user.id)) { await client.query("ROLLBACK"); return jsonError(res, 404, "Orçamento não encontrado para sua conta."); }
+    if (!["enviado", "visualizado"].includes(proposal.status)) { await client.query("ROLLBACK"); return jsonError(res, 409, "Este orçamento não está mais disponível."); }
+    const scheduledAt = new Date(String(proposal.available_start_at || ""));
+    if (Number.isNaN(scheduledAt.getTime()) || scheduledAt.getTime() <= Date.now()) { await client.query("ROLLBACK"); return jsonError(res, 409, "Peça ao profissional para atualizar o orçamento com uma data futura antes de aceitar."); }
+    const existing = await client.query("SELECT id FROM bookings WHERE request_id = $1 AND status <> 'cancelado' LIMIT 1", [proposal.request_id]);
+    if (existing.rows[0]) { await client.query("ROLLBACK"); return jsonError(res, 409, "Este pedido já tem um serviço contratado."); }
+    professionalId = Number(proposal.professional_id);
+    const inserted = await client.query(
+      `INSERT INTO bookings (request_id, proposal_id, customer_id, professional_id, scheduled_at, estimated_days, agreed_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [proposal.request_id, proposal.id, res.locals.user.id, professionalId, scheduledAt.toISOString(), proposal.estimated_days, proposal.amount],
+    );
+    const createdBooking = inserted.rows[0];
+    booking = createdBooking;
+    await client.query(
+      `INSERT INTO service_reminders (booking_id, remind_at, label)
+       VALUES ($1, GREATEST($2::timestamptz - INTERVAL '24 hours', NOW()), '24_horas'),
+              ($1, GREATEST($2::timestamptz - INTERVAL '1 hour', NOW()), '1_hora')
+       ON CONFLICT (booking_id, label) DO NOTHING`,
+      [createdBooking.id, scheduledAt.toISOString()],
+    );
+    if (proposal.estimated_days) {
+      await client.query(
+        `INSERT INTO service_reminders (booking_id, remind_at, label)
+         VALUES ($1, GREATEST($2::timestamptz + ($3::int * INTERVAL '1 day') - INTERVAL '24 hours', NOW()), 'fim_24_horas')
+         ON CONFLICT (booking_id, label) DO NOTHING`,
+        [createdBooking.id, scheduledAt.toISOString(), proposal.estimated_days],
+      );
+    }
+    await client.query("UPDATE proposals SET status = CASE WHEN id = $2 THEN 'aceito' ELSE 'recusado' END, updated_at = NOW() WHERE request_id = $1", [proposal.request_id, proposal.id]);
+    await client.query("UPDATE service_requests SET status = 'em_execucao', updated_at = NOW() WHERE id = $1", [proposal.request_id]);
+    await client.query("COMMIT");
+    await notifyUser(professionalId, "servico_agendado", "Orçamento aceito", `${res.locals.user.name} aceitou seu orçamento para ${proposal.title}.`, "/servicos/acompanhar").catch((error) => console.error("Não foi possível notificar sobre o agendamento:", error));
+    res.status(201).json({ booking });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    console.error(error);
+    jsonError(res, 500, "Não foi possível aceitar este orçamento.");
+  } finally { client.release(); }
 });
 
 app.get("/api/bookings", requireUser, async (_req, res) => {
   try {
     const result = await pool.query(
-      `SELECT b.*, u.name AS other_user_name
+      `SELECT b.*, u.name AS other_user_name, sr.title
        FROM bookings b
        JOIN users u ON u.id = CASE WHEN b.customer_id = $1 THEN b.professional_id ELSE b.customer_id END
+       LEFT JOIN service_requests sr ON sr.id = b.request_id
        WHERE b.customer_id = $1 OR b.professional_id = $1
        ORDER BY COALESCE(b.scheduled_at, b.created_at) DESC`,
       [res.locals.user.id],
@@ -1159,6 +1218,142 @@ app.get("/api/bookings", requireUser, async (_req, res) => {
     console.error(error);
     jsonError(res, 500, "Não foi possível carregar seus serviços agendados.");
   }
+});
+
+app.post("/api/bookings/:id/arrival", requireUser, async (req, res) => {
+  const bookingId = Number(req.params.id);
+  const status = String(req.body?.status || "");
+  if (!Number.isInteger(bookingId) || !["a_caminho", "cheguei"].includes(status)) return jsonError(res, 400, "Atualização de chegada inválida.");
+  try {
+    const result = await pool.query("UPDATE bookings SET arrival_status = $1, updated_at = NOW() WHERE id = $2 AND professional_id = $3 AND status IN ('agendado', 'em_execucao') RETURNING *", [status, bookingId, res.locals.user.id]);
+    if (!result.rows[0]) return jsonError(res, 404, "Serviço não encontrado ou indisponível.");
+    const booking = result.rows[0];
+    await notifyUser(booking.customer_id, "servico_chegada", status === "a_caminho" ? "Profissional a caminho" : "Profissional chegou", status === "a_caminho" ? "O profissional avisou que está a caminho." : "O profissional avisou que chegou ao local.", "/servicos/acompanhar").catch(() => undefined);
+    res.json({ booking });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar a chegada."); }
+});
+
+app.post("/api/bookings/:id/start", requireUser, async (req, res) => {
+  try {
+    const result = await pool.query("UPDATE bookings SET status = 'em_execucao', updated_at = NOW() WHERE id = $1 AND professional_id = $2 AND status = 'agendado' RETURNING *", [req.params.id, res.locals.user.id]);
+    if (!result.rows[0]) return jsonError(res, 404, "Serviço não encontrado ou já iniciado.");
+    await notifyUser(result.rows[0].customer_id, "servico_iniciado", "Serviço iniciado", "O profissional iniciou o serviço contratado.", "/servicos/acompanhar").catch(() => undefined);
+    res.json({ booking: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível iniciar o serviço."); }
+});
+
+app.post("/api/bookings/:id/complete", requireUser, async (req, res) => {
+  try {
+    const result = await pool.query("UPDATE bookings SET status = 'aguardando_confirmacao', professional_completed_at = NOW(), updated_at = NOW() WHERE id = $1 AND professional_id = $2 AND status = 'em_execucao' RETURNING *", [req.params.id, res.locals.user.id]);
+    if (!result.rows[0]) return jsonError(res, 409, "Inicie o serviço antes de marcá-lo como concluído.");
+    await notifyUser(result.rows[0].customer_id, "servico_concluido", "Confirme a conclusão", "O profissional marcou o serviço como concluído. Confira e confirme ou informe um problema.", "/servicos/acompanhar").catch(() => undefined);
+    res.json({ booking: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível concluir o serviço."); }
+});
+
+app.post("/api/bookings/:id/confirm", requireUser, async (req, res) => {
+  try {
+    const result = await pool.query("UPDATE bookings SET status = 'concluido', customer_confirmed_at = NOW(), payment_status = 'aguardando_integracao', updated_at = NOW() WHERE id = $1 AND customer_id = $2 AND status = 'aguardando_confirmacao' AND issue_details IS NULL RETURNING *", [req.params.id, res.locals.user.id]);
+    if (!result.rows[0]) return jsonError(res, 409, "Este serviço ainda não está disponível para confirmação.");
+    await notifyUser(result.rows[0].professional_id, "servico_confirmado", "Conclusão confirmada", "O cliente confirmou a conclusão. O pagamento ficará disponível quando o Mercado Pago estiver integrado.", "/servicos/acompanhar").catch(() => undefined);
+    res.json({ booking: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível confirmar a conclusão."); }
+});
+
+app.post("/api/bookings/:id/issue", requireUser, async (req, res) => {
+  const details = String(req.body?.details || "").trim();
+  if (!details || details.length > 3000) return jsonError(res, 400, "Descreva o problema em até 3.000 caracteres.");
+  try {
+    const result = await pool.query("UPDATE bookings SET status = 'em_disputa', payment_status = 'problema', issue_details = $1, issue_reported_by = $2, updated_at = NOW() WHERE id = $3 AND customer_id = $2 AND status = 'aguardando_confirmacao' RETURNING *", [details, res.locals.user.id, req.params.id]);
+    if (!result.rows[0]) return jsonError(res, 409, "Só é possível informar um problema enquanto a conclusão aguarda confirmação.");
+    await notifyUser(result.rows[0].professional_id, "problema_servico", "Problema informado pelo cliente", "O cliente pediu análise do serviço antes de confirmar a conclusão.", "/servicos").catch(() => undefined);
+    await pool.query(
+      `INSERT INTO notifications (user_id, type, title, body, link)
+       SELECT id, 'caso_servico', 'Problema em um serviço', $1, '/admin/denuncias?tab=servicos'
+       FROM users WHERE role = 'admin' AND is_active = TRUE`,
+      [`${res.locals.user.name} informou um problema no serviço #${result.rows[0].id}.`],
+    ).catch((error) => console.error("Não foi possível avisar a equipe sobre o caso:", error));
+    res.json({ booking: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível registrar o problema."); }
+});
+
+app.get("/api/admin/service-issues", requireAdmin, async (req, res) => {
+  const status = String(req.query.status || "todas");
+  if (!["todas", "aberta", "em_analise", "resolvida", "ignorada"].includes(status)) return jsonError(res, 400, "Filtro de casos inválido.");
+  try {
+    const result = await pool.query(
+      `SELECT b.id, b.status AS booking_status, b.issue_details, b.issue_review_status AS status,
+        b.issue_review_note AS review_note, b.issue_reviewed_at AS reviewed_at,
+        b.scheduled_at, b.agreed_amount, b.created_at,
+        customer.name AS customer_name, professional.name AS professional_name,
+        reporter.name AS reporter_name, sr.title AS service_title
+       FROM bookings b
+       JOIN users customer ON customer.id = b.customer_id
+       JOIN users professional ON professional.id = b.professional_id
+       LEFT JOIN users reporter ON reporter.id = b.issue_reported_by
+       LEFT JOIN service_requests sr ON sr.id = b.request_id
+       WHERE b.issue_details IS NOT NULL AND ($1 = 'todas' OR b.issue_review_status = $1)
+       ORDER BY CASE b.issue_review_status WHEN 'aberta' THEN 0 WHEN 'em_analise' THEN 1 ELSE 2 END, b.updated_at DESC
+       LIMIT 200`, [status],
+    );
+    res.json({ issues: result.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar os problemas de serviços."); }
+});
+
+app.patch("/api/admin/service-issues/:id", requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const status = String(req.body?.status || "");
+  const reviewNote = String(req.body?.reviewNote || "").trim();
+  if (!Number.isInteger(id) || id < 1 || !["em_analise", "resolvida", "ignorada"].includes(status)) return jsonError(res, 400, "Atualização do caso inválida.");
+  if (reviewNote.length > 2000) return jsonError(res, 400, "A anotação deve ter até 2.000 caracteres.");
+  try {
+    const result = await pool.query(
+      `UPDATE bookings SET issue_review_status = $2, issue_review_note = $3,
+        issue_reviewed_by = $4, issue_reviewed_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND issue_details IS NOT NULL
+       RETURNING id, issue_review_status AS status, issue_review_note AS review_note, issue_reviewed_at AS reviewed_at`,
+      [id, status, reviewNote || null, res.locals.user.id],
+    );
+    if (!result.rows[0]) return jsonError(res, 404, "Caso de serviço não encontrado.");
+    const participants = await pool.query("SELECT customer_id, professional_id FROM bookings WHERE id = $1", [id]);
+    if (participants.rows[0]) {
+      const message = `A equipe atualizou a análise do problema do serviço #${id}: ${status.replaceAll("_", " ")}.${reviewNote ? ` ${reviewNote}` : ""}`;
+      await Promise.all([participants.rows[0].customer_id, participants.rows[0].professional_id].map((userId) =>
+        notifyUser(userId, "caso_servico_atualizado", "Atualização sobre o problema do serviço", message, "/servicos/acompanhar").catch(() => undefined),
+      ));
+    }
+    res.json({ issue: result.rows[0] });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível atualizar o caso de serviço."); }
+});
+
+app.get("/api/wallet", requireUser, async (req, res) => {
+  try {
+    const [settings, transactions] = await Promise.all([
+      pool.query("SELECT value FROM platform_settings WHERE key = 'commission_rate_percent'"),
+      pool.query(
+        `SELECT pt.*, b.customer_id, b.professional_id, sr.title
+         FROM payment_transactions pt JOIN bookings b ON b.id = pt.booking_id
+         LEFT JOIN service_requests sr ON sr.id = b.request_id
+         WHERE ($2::boolean = TRUE OR b.customer_id = $1 OR b.professional_id = $1)
+         ORDER BY pt.created_at DESC`, [res.locals.user.id, res.locals.user.role === "admin"],
+      ),
+    ]);
+    const commissionRatePercent = Number(settings.rows[0]?.value ?? 8);
+    res.json({ commissionRatePercent, transactions: transactions.rows });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar a Carteira."); }
+});
+
+app.put("/api/admin/platform-settings/commission", requireAdmin, async (req, res) => {
+  const rate = Number(req.body?.rate);
+  if (!Number.isFinite(rate) || rate < 0 || rate > 100) return jsonError(res, 400, "Informe uma taxa entre 0% e 100%.");
+  try {
+    await pool.query(
+      `INSERT INTO platform_settings (key, value, updated_at) VALUES ('commission_rate_percent', $1::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [JSON.stringify(rate)],
+    );
+    res.json({ commissionRatePercent: rate });
+  } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível salvar a taxa da plataforma."); }
 });
 
 app.post("/api/reviews", requireUser, async (req, res) => {
@@ -1277,6 +1472,16 @@ async function ensureRuntimeSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS report_events_report_created_idx ON report_events (report_id, created_at ASC);
+    ALTER TABLE report_events ENABLE ROW LEVEL SECURITY;
+    REVOKE ALL ON TABLE report_events FROM PUBLIC;
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        REVOKE ALL ON TABLE report_events FROM anon;
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        REVOKE ALL ON TABLE report_events FROM authenticated;
+      END IF;
+    END $$;
     CREATE INDEX IF NOT EXISTS profiles_location_idx ON profiles (latitude, longitude);
     CREATE INDEX IF NOT EXISTS notifications_unread_idx ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
     CREATE INDEX IF NOT EXISTS reports_message_idx ON reports (message_id) WHERE message_id IS NOT NULL;
