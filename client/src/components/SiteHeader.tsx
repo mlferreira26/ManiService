@@ -101,7 +101,7 @@ export default function SiteHeader() {
 
   return <header className="sticky top-0 z-50 border-b border-border/80 bg-white/95 backdrop-blur">
     <div className="container flex min-h-16 items-center justify-between gap-2 sm:gap-4">
-      <Link href={brandHref}><a className="flex shrink-0 items-center gap-2 font-bold text-primary"><span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-sm tracking-tight text-primary-foreground shadow-sm">MS</span><span className="text-base tracking-tight sm:text-xl">Mani Service</span></a></Link>
+      <Link href={brandHref}><a className="flex shrink-0 items-center gap-2 font-bold text-primary"><span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white shadow-sm"><img src="/maniservice-monograma.png" alt="" aria-hidden="true" className="h-9 w-[54px] max-w-none object-cover" /></span><span className="text-base tracking-tight sm:text-xl">Mani Service</span></a></Link>
       {connected && <div className="hidden min-w-0 flex-1 items-center justify-center gap-3 xl:flex">{searchForm("w-full max-w-md")}<nav className="flex shrink-0 items-center gap-1" aria-label="Atalhos"><Link href="/perfil"><a className={`rounded-lg px-3 py-2 text-sm font-medium ${location === "/perfil" ? "bg-blue-50 text-primary" : "text-slate-600 hover:bg-slate-50 hover:text-primary"}`}>Meu perfil</a></Link><Link href="/painel"><a className={`rounded-lg px-3 py-2 text-sm font-medium ${location === "/painel" ? "bg-blue-50 text-primary" : "text-slate-600 hover:bg-slate-50 hover:text-primary"}`}>Painel</a></Link></nav></div>}
       <div className="flex shrink-0 items-center gap-1 sm:gap-2">
         {connected && <>
