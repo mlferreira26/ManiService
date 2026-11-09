@@ -4,7 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { Pool, type PoolClient } from "pg";
 import dotenv from "dotenv";
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
@@ -48,15 +48,6 @@ function encryptIdentityData(value: { cpf: string; birthDate: string }) {
   const cipher = createCipheriv("aes-256-gcm", identityEncryptionKey(), iv);
   const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
   return `${iv.toString("base64")}.${cipher.getAuthTag().toString("base64")}.${encrypted.toString("base64")}`;
-}
-
-function decryptIdentityData(value: string): { cpf: string; birthDate: string } {
-  const [ivValue, tagValue, encryptedValue] = value.split(".");
-  if (!ivValue || !tagValue || !encryptedValue) throw new Error("Dados de verificação inválidos.");
-  const decipher = createDecipheriv("aes-256-gcm", identityEncryptionKey(), Buffer.from(ivValue, "base64"));
-  decipher.setAuthTag(Buffer.from(tagValue, "base64"));
-  const decrypted = Buffer.concat([decipher.update(Buffer.from(encryptedValue, "base64")), decipher.final()]).toString("utf8");
-  return JSON.parse(decrypted) as { cpf: string; birthDate: string };
 }
 
 function isValidCpf(value: string) {
@@ -452,7 +443,9 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
     const result = await pool.query(
       `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.last_login_at,
         u.moderation_blocked_at, u.moderation_blocked_until, u.moderation_block_reason,
-        p.city, p.state, COUNT(*) OVER()::int AS total_count
+        p.city, p.state,
+        (SELECT iv.status FROM identity_verification_requests iv WHERE iv.user_id = u.id ORDER BY iv.submitted_at DESC, iv.id DESC LIMIT 1) AS identity_verification_status,
+        COUNT(*) OVER()::int AS total_count
        FROM users u LEFT JOIN profiles p ON p.user_id = u.id
        WHERE ($1 = '' OR u.name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%')
          AND ($2 = 'todos' OR u.role = $2)
@@ -497,16 +490,12 @@ app.get("/api/admin/users/:id", requireAdmin, async (req, res) => {
          WHERE r.professional_id = $1 ORDER BY r.created_at DESC LIMIT 50`, [userId],
       ),
       pool.query(
-        `SELECT id, status, encrypted_data, admin_note, submitted_at, reviewed_at
+        `SELECT id, status, admin_note, submitted_at, reviewed_at
          FROM identity_verification_requests WHERE user_id = $1 ORDER BY submitted_at DESC LIMIT 1`, [userId],
       ),
     ]);
     const verification = verificationResult.rows[0] || null;
-    let identityVerification: Record<string, unknown> | null = verification ? { id: verification.id, status: verification.status, admin_note: verification.admin_note, submitted_at: verification.submitted_at, reviewed_at: verification.reviewed_at } : null;
-    if (verification && verification.status === "pendente") {
-      try { identityVerification = { ...identityVerification, ...decryptIdentityData(String(verification.encrypted_data)) }; }
-      catch (error) { console.error("Falha ao descriptografar dados da verificação de identidade.", error); return jsonError(res, 503, "Não foi possível abrir os dados da verificação. Confira a chave IDENTITY_DATA_KEY do servidor."); }
-    }
+    const identityVerification: Record<string, unknown> | null = verification ? { id: verification.id, status: verification.status, admin_note: verification.admin_note, submitted_at: verification.submitted_at, reviewed_at: verification.reviewed_at } : null;
     res.json({ account, posts: postsResult.rows, reviews: reviewsResult.rows, identityVerification });
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível carregar o perfil da conta."); }
 });
