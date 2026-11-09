@@ -781,12 +781,12 @@ app.put("/api/profile", requireUser, async (req, res) => {
       await client.query("BEGIN");
       await client.query("UPDATE users SET name = $2, phone = $3 WHERE id = $1", [res.locals.user.id, String(name).trim(), phone || null]);
       await client.query(
-        `UPDATE profiles SET bio = $2, address_line = $3, neighborhood = $4, city = $5,
-         state = $6, postal_code = $7, avatar_url = $8,
-         latitude = CASE WHEN LOWER(BTRIM(COALESCE(city, ''))) <> LOWER(BTRIM(COALESCE($5, '')))
-                              OR LOWER(BTRIM(COALESCE(state, ''))) <> LOWER(BTRIM(COALESCE($6, ''))) THEN NULL ELSE latitude END,
-         longitude = CASE WHEN LOWER(BTRIM(COALESCE(city, ''))) <> LOWER(BTRIM(COALESCE($5, '')))
-                               OR LOWER(BTRIM(COALESCE(state, ''))) <> LOWER(BTRIM(COALESCE($6, ''))) THEN NULL ELSE longitude END
+        `UPDATE profiles SET bio = $2, address_line = $3, neighborhood = $4, city = $5::varchar(120),
+         state = $6::varchar(2), postal_code = $7, avatar_url = $8,
+         latitude = CASE WHEN LOWER(BTRIM(COALESCE(city, ''))) <> LOWER(BTRIM(COALESCE($5::varchar(120), '')))
+                              OR LOWER(BTRIM(COALESCE(state, ''))) <> LOWER(BTRIM(COALESCE($6::varchar(2), ''))) THEN NULL ELSE latitude END,
+         longitude = CASE WHEN LOWER(BTRIM(COALESCE(city, ''))) <> LOWER(BTRIM(COALESCE($5::varchar(120), '')))
+                               OR LOWER(BTRIM(COALESCE(state, ''))) <> LOWER(BTRIM(COALESCE($6::varchar(2), ''))) THEN NULL ELSE longitude END
          WHERE user_id = $1`,
         [res.locals.user.id, bio || null, addressLine || null, neighborhood || null, String(city || "").trim() || null, String(state || "").trim().toUpperCase() || null, postalCode || null, avatarUrl || null],
       );
@@ -811,7 +811,11 @@ app.put("/api/profile", requireUser, async (req, res) => {
     res.json({ profile: result.rows[0] });
   } catch (error) {
     console.error(error);
-    jsonError(res, 500, "Não foi possível salvar seu perfil.");
+    const databaseError = error as { code?: string };
+    const message = databaseError.code === "42P08"
+      ? "Não foi possível salvar a cidade e o estado do perfil. Confira esses campos e tente novamente."
+      : "Não foi possível salvar seu perfil. Tente novamente; se o erro persistir, entre em contato com o suporte.";
+    jsonError(res, 500, message);
   }
 });
 
