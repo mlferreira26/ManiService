@@ -714,7 +714,8 @@ app.get("/api/account/identity-verification", requireUser, async (_req, res) => 
 app.post("/api/account/identity-verification", requireUser, async (req, res) => {
   const cpf = String(req.body?.cpf || "").replace(/\D/g, "");
   const birthDate = String(req.body?.birthDate || "");
-  if (!isValidCpf(cpf)) return jsonError(res, 400, "Informe um CPF válido.");
+  if (!/^\d{11}$/.test(cpf)) return jsonError(res, 400, "Informe os 11 números do CPF, com ou sem pontuação.");
+  if (!isValidCpf(cpf)) return jsonError(res, 400, "Os dígitos verificadores do CPF não conferem. Revise o número informado.");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate) || Number.isNaN(Date.parse(`${birthDate}T00:00:00Z`)) || new Date(`${birthDate}T00:00:00Z`).toISOString().slice(0, 10) !== birthDate || new Date(`${birthDate}T00:00:00Z`).getTime() > Date.now()) return jsonError(res, 400, "Informe uma data de nascimento válida.");
   let encryptedData: string;
   try { encryptedData = encryptIdentityData({ cpf, birthDate }); }

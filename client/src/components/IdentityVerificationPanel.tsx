@@ -45,6 +45,7 @@ export default function IdentityVerificationPanel() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (submitting || !isValidCpf(cpf) || !birthDate) return;
     setSubmitting(true);
     try {
       const result = await api.submitIdentityVerification(cpf, birthDate);
@@ -55,6 +56,12 @@ export default function IdentityVerificationPanel() {
     finally { setSubmitting(false); }
   }
 
+  const cpfDigits = cpf.replace(/\D/g, "");
+  const cpfError = !cpf ? "" : cpfDigits.length < 11
+    ? "Informe os 11 números do CPF. A pontuação é adicionada automaticamente."
+    : !isValidCpf(cpf)
+      ? "O formato está correto, mas os dígitos verificadores do CPF não conferem. Revise o número informado."
+      : "";
   const verified = request?.status === "verificada";
   const pending = request?.status === "pendente";
 
@@ -66,7 +73,7 @@ export default function IdentityVerificationPanel() {
           {request?.status === "ajuste_solicitado" && <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm"><p className="font-medium">A equipe pediu uma correção.</p><p className="mt-1">{request.admin_note}</p></div>}
           <p className="mb-4 text-sm text-muted-foreground">Informe seu CPF e sua data de nascimento para a equipe revisar. Esses dados não aparecem no perfil público.</p>
           <form className="grid gap-4 sm:grid-cols-2" onSubmit={submit}>
-            <div className="space-y-2"><Label htmlFor="verification-cpf">CPF</Label><Input id="verification-cpf" inputMode="numeric" autoComplete="off" maxLength={14} required value={cpf} aria-invalid={Boolean(cpf) && !isValidCpf(cpf)} onChange={(event) => setCpf(formatCpf(event.target.value))} placeholder="000.000.000-00" />{cpf && !isValidCpf(cpf) && <p className="text-xs text-destructive">Digite um CPF válido no formato 000.000.000-00.</p>}</div>
+            <div className="space-y-2"><Label htmlFor="verification-cpf">CPF</Label><Input id="verification-cpf" inputMode="numeric" autoComplete="off" maxLength={14} required value={cpf} aria-invalid={Boolean(cpfError)} aria-describedby={cpfError ? "verification-cpf-error" : "verification-cpf-help"} onChange={(event) => setCpf(formatCpf(event.target.value))} placeholder="000.000.000-00" />{cpfError ? <p id="verification-cpf-error" className="text-xs text-destructive" aria-live="polite">{cpfError}</p> : <p id="verification-cpf-help" className="text-xs text-muted-foreground">Digite ou cole o CPF com ou sem pontuação. A aprovação é feita pela administração.</p>}</div>
             <div className="space-y-2"><Label htmlFor="verification-birth-date">Data de nascimento</Label><Input id="verification-birth-date" type="date" required value={birthDate} max={new Date().toISOString().slice(0, 10)} onChange={(event) => setBirthDate(event.target.value)} /></div>
             <div className="sm:col-span-2"><Button type="submit" disabled={submitting || !isValidCpf(cpf) || !birthDate}>{submitting ? "Enviando..." : request?.status === "ajuste_solicitado" ? "Enviar correção para análise" : "Solicitar verificação"}</Button></div>
           </form>

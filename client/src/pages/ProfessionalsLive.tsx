@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useLocation } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import {
   CheckCircle2,
   MapPin,
@@ -32,19 +32,15 @@ type Professional = {
   followers_count?: number;
 };
 export default function ProfessionalsLive() {
-  const [location, setLocation] = useLocation();
+  const [, setLocation] = useLocation();
+  const searchString = useSearch();
   const { user } = useAuth();
   const [items, setItems] = useState<Professional[]>([]);
-  const [search, setSearch] = useState(
-    () => new URLSearchParams(window.location.search).get("search") || ""
-  );
+  const search = new URLSearchParams(searchString).get("search")?.trim() || "";
   const [city, setCity] = useState("");
   const [role, setRole] = useState("todos");
   const [radius, setRadius] = useState("");
   const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    setSearch(new URLSearchParams(window.location.search).get("search") || "");
-  }, [location]);
 
   useEffect(() => {
     let active = true;
@@ -62,7 +58,7 @@ export default function ProfessionalsLive() {
             if (active) setItems(users as Professional[]);
           })
           .catch(error => {
-            if (active) toast.error(error.message);
+            if (active) { setItems([]); toast.error(error.message); }
           })
           .finally(() => {
             if (active) setLoading(false);

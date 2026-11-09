@@ -1,5 +1,5 @@
 import { Bell, BriefcaseBusiness, CalendarDays, LayoutDashboard, LogOut, Menu, MessageCircle, Newspaper, Search, Settings as SettingsIcon, ShieldCheck, Users, WalletCards } from "lucide-react";
-import { Link, useLocation } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -10,11 +10,15 @@ import { playChatNotificationSound } from "@/lib/chat-sound";
 
 export default function SiteHeader() {
   const [location, setLocation] = useLocation();
+  const searchString = useSearch();
   const [menuOpen, setMenuOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notifications, setNotifications] = useState<Array<Record<string, any>>>([]);
   const [hasUnreadMessages, setHasUnreadMessages] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(() => new URLSearchParams(window.location.search).get("search") || "");
+  useEffect(() => {
+    setSearchQuery(new URLSearchParams(searchString).get("search") || "");
+  }, [searchString]);
   const lastChatMessageIds = useRef<Record<number, number>>({});
   const { user, loading, logout } = useAuth();
   const appLinks = [
