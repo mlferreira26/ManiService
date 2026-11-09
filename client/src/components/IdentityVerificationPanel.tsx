@@ -78,7 +78,7 @@ export default function IdentityVerificationPanel() {
             <div className="sm:col-span-2"><Button type="submit" disabled={submitting || !isValidCpf(cpf) || !birthDate}>{submitting ? "Enviando..." : request?.status === "ajuste_solicitado" ? "Enviar correção para análise" : "Solicitar verificação"}</Button></div>
           </form>
         </>}
-        <p className="mt-4 flex items-start gap-2 border-t pt-3 text-xs text-muted-foreground"><LockKeyhole className="mt-0.5 h-4 w-4 shrink-0" />CPF e nascimento são armazenados criptografados no banco e não aparecem nas telas do aplicativo. O selo é liberado somente após aprovação da administração.</p>
+        <p className="mt-4 flex items-start gap-2 border-t pt-3 text-xs text-muted-foreground"><LockKeyhole className="mt-0.5 h-4 w-4 shrink-0" />CPF e nascimento são armazenados criptografados.</p>
       </>}
     </CardContent>
   </Card>;
