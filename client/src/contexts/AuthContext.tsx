@@ -5,7 +5,6 @@ export type AuthUser = { id: number; name: string; email: string; role: string; 
 type AuthContextValue = {
   user: AuthUser | null;
   loading: boolean;
-  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string; city: string; state: string }) => Promise<AuthUser>;
   login: (payload: { email: string; password: string }) => Promise<AuthUser>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -23,13 +22,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     finally { if (revision === authRevision.current) setLoading(false); }
   };
   useEffect(() => { void refresh(); }, []);
-  const register = async (payload: Parameters<AuthContextValue["register"]>[0]) => { const revision = ++authRevision.current; const result = await api.register(payload); if (revision === authRevision.current) setUser(result.user); return result.user; };
   const login = async (payload: Parameters<AuthContextValue["login"]>[0]) => { const revision = ++authRevision.current; const result = await api.login(payload); if (revision === authRevision.current) setUser(result.user); return result.user; };
   const logout = async () => {
     const revision = ++authRevision.current;
     if (revision === authRevision.current) setUser(null);
     try { await api.logout(); } catch { /* A troca de conta continua disponível mesmo se a sessão já expirou. */ }
   };
-  return <AuthContext.Provider value={{ user, loading, register, login, logout, refresh }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, loading, login, logout, refresh }}>{children}</AuthContext.Provider>;
 }
 export function useAuth() { const value = useContext(AuthContext); if (!value) throw new Error("useAuth precisa estar dentro de AuthProvider"); return value; }

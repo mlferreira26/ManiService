@@ -589,40 +589,94 @@ app.get("/api/health", async (_req, res) => {
 
 app.post("/api/auth/register", async (req, res) => {
   const { name, email, password, role, specialty } = req.body || {};
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const fullName = String(name || "").trim();
   const city = String(req.body?.city || "").trim();
   const state = String(req.body?.state || "").trim().toUpperCase();
-  if (!name || !email || !password || !city || !state || !["usuario", "profissional"].includes(role)) return jsonError(res, 400, "Nome, e-mail, senha, cidade, UF e perfil são obrigatórios.");
-  if (city.length > 100 || !/^[A-Z]{2}$/.test(state)) return jsonError(res, 400, "Confira a cidade e informe uma UF válida com duas letras.");
-  if (String(password).length < 8) return jsonError(res, 400, "A senha precisa ter pelo menos 8 caracteres.");
-  const normalizedEmail = String(email).trim().toLowerCase();
-  let client;
+  if (!fullName || !city || !/^[A-Z]{2}$/.test(state) || city.length > 100 || !["usuario", "profissional"].includes(role)) return jsonError(res, 400, "Confira nome, cidade, UF e tipo de conta.");
+  if (normalizedEmail.length > 254 || !/^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(normalizedEmail)) return jsonError(res, 400, "Informe um e-mail válido.");
+  if (typeof password !== "string" || password.length < 8 || password.length > 256) return jsonError(res, 400, "A senha precisa ter entre 8 e 256 caracteres.");
+  const clientId = process.env.GMAIL_CLIENT_ID?.trim();
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET?.trim();
+  const refreshToken = process.env.GMAIL_REFRESH_TOKEN?.trim();
+  const from = process.env.MAIL_FROM?.trim();
+  if (!clientId || !clientSecret || !refreshToken || !from) return jsonError(res, 503, "A confirmação por e-mail está indisponível. Tente novamente mais tarde.");
+
   try {
+    const existing = await pool.query("SELECT 1 FROM users WHERE LOWER(email) = $1", [normalizedEmail]);
+    if (existing.rowCount) return jsonError(res, 409, "Este e-mail já está cadastrado.");
+    const passwordHash = await hashPassword(password);
+    const token = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const pending = await pool.query(
+      `INSERT INTO pending_registrations (email, token_hash, registration, expires_at)
+       VALUES ($1, $2, $3, NOW() + INTERVAL '30 minutes')
+       ON CONFLICT (email) DO UPDATE SET token_hash = EXCLUDED.token_hash,
+         registration = EXCLUDED.registration, expires_at = EXCLUDED.expires_at, sent_at = NOW()
+       WHERE pending_registrations.sent_at <= NOW() - INTERVAL '1 minute'`,
+      [normalizedEmail, tokenHash, { fullName, passwordHash, role, city, state, specialty: String(specialty || "").trim() || "Serviços gerais" }],
+    );
+    if (!pending.rowCount) return jsonError(res, 429, "Aguarde um minuto antes de solicitar outro e-mail.");
+    try {
+      const link = new URL("/confirmar-email", process.env.APP_URL || "http://localhost:5000");
+      link.hash = token;
+      await sendGmailHtml(
+        { clientId, clientSecret, refreshToken, from }, normalizedEmail, "Confirme seu e-mail no ManiService",
+        `<h1>Confirme seu e-mail</h1><p>Abra este link para confirmar o cadastro que você iniciou no ManiService.</p><p><a href="${link.href}">Confirmar meu e-mail</a></p><p>O link expira em 30 minutos. Se você não solicitou o cadastro, ignore este e-mail.</p>`,
+      );
+    } catch (error) {
+      await pool.query("DELETE FROM pending_registrations WHERE email = $1 AND token_hash = $2", [normalizedEmail, tokenHash]);
+      console.error("Falha no envio da confirmação pela Gmail API:", error);
+      return jsonError(res, 502, "Não foi possível enviar a confirmação. Tente novamente.");
+    }
+    res.status(202).json({ email: normalizedEmail });
+  } catch (error) {
+    console.error("Falha ao iniciar cadastro:", error);
+    jsonError(res, 500, "Não foi possível iniciar o cadastro agora.");
+  }
+});
+
+app.post("/api/auth/confirm-email", async (req, res) => {
+  const token = String(req.body?.token || "");
+  const password = req.body?.password;
+  if (!/^[a-f0-9]{64}$/.test(token) || typeof password !== "string" || password.length > 256) return jsonError(res, 400, "Confira o link e a senha do cadastro.");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  let client: PoolClient | undefined;
+  try {
+    const pending = await pool.query(
+      "SELECT registration FROM pending_registrations WHERE token_hash = $1 AND expires_at > NOW()",
+      [tokenHash],
+    );
+    if (!pending.rows[0]) return jsonError(res, 400, "Este link expirou ou já foi usado.");
+    if (!(await verifyPassword(password, pending.rows[0].registration.passwordHash))) return jsonError(res, 400, "Informe a senha que você escolheu no cadastro.");
     client = await pool.connect();
     await client.query("BEGIN");
-    const passwordHash = await hashPassword(String(password));
-    const userResult = await client.query(
-      `INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, name, email, role`,
-      [String(name).trim(), normalizedEmail, passwordHash, role],
+    const result = await client.query(
+      "DELETE FROM pending_registrations WHERE token_hash = $1 AND expires_at > NOW() RETURNING email, registration",
+      [tokenHash],
     );
-    const user = userResult.rows[0];
-    await client.query("INSERT INTO profiles (user_id, city, state) VALUES ($1, $2, $3)", [user.id, city, state || null]);
+    const record = result.rows[0];
+    if (!record) {
+      await client.query("ROLLBACK");
+      return jsonError(res, 400, "Este link expirou ou já foi usado.");
+    }
+    const { fullName, passwordHash, role, city, state, specialty } = record.registration;
+    const created = await client.query(
+      "INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id",
+      [fullName, record.email, passwordHash, role],
+    );
+    const userId = created.rows[0].id;
+    await client.query("INSERT INTO profiles (user_id, city, state) VALUES ($1, $2, $3)", [userId, city, state]);
     if (role === "profissional") {
-      await client.query("INSERT INTO professional_profiles (user_id, specialty) VALUES ($1, $2)", [user.id, specialty || "Serviços gerais"]);
+      await client.query("INSERT INTO professional_profiles (user_id, specialty) VALUES ($1, $2)", [userId, specialty]);
     }
     await client.query("COMMIT");
-    const sessionId = randomUUID();
-    await pool.query("INSERT INTO sessions (id, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 days')", [sessionId, user.id]);
-    res.setHeader("Set-Cookie", `${sessionCookieName}=${encodeURIComponent(sessionId)}; Max-Age=2592000; Path=/; HttpOnly; SameSite=${isHttps ? "None" : "Lax"}${isHttps ? "; Secure" : ""}`);
-    res.status(201).json({ user: safeUser(user) });
-  } catch (error: any) {
-    if (client) await client.query("ROLLBACK").catch(() => undefined);
-    if (error?.code === "23505") return jsonError(res, 409, "Este e-mail já está cadastrado.");
-    if (error?.code === "42501") {
-      console.error("Supabase negou a operação de cadastro. Verifique se DATABASE_URL usa o usuário postgres/owner e se as tabelas estão no schema public.", error);
-      return jsonError(res, 500, "O banco de dados negou o cadastro. Confira as permissões do usuário DATABASE_URL e execute o schema no projeto Supabase.");
-    }
-    console.error(error);
-    jsonError(res, 500, "Não foi possível criar a conta. Confira a conexão e as tabelas do banco de dados.");
+    res.json({ ok: true });
+  } catch (error) {
+    await client?.query("ROLLBACK").catch(() => undefined);
+    if ((error as { code?: string }).code === "23505") return jsonError(res, 409, "Este e-mail já tem uma conta. Entre pelo login.");
+    console.error("Falha ao confirmar cadastro:", error);
+    jsonError(res, 500, "Não foi possível confirmar o cadastro agora.");
   } finally {
     client?.release();
   }

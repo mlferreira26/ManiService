@@ -12,7 +12,8 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string; city: string; state: string }) => request<{ user: { id: number; name: string; email: string; role: string } }>("/api/auth/register", { method: "POST", body: JSON.stringify(payload) }),
+  register: (payload: { name: string; email: string; password: string; role: "usuario" | "profissional"; specialty?: string; city: string; state: string }) => request<{ email: string }>("/api/auth/register", { method: "POST", body: JSON.stringify(payload) }),
+  confirmEmail: (token: string, password: string) => request<{ ok: boolean }>("/api/auth/confirm-email", { method: "POST", body: JSON.stringify({ token, password }) }),
   login: (payload: { email: string; password: string }) => request<{ user: { id: number; name: string; email: string; role: string; isModerationBlocked?: boolean; moderationBlockedUntil?: string | null; moderationBlockReason?: string | null } }>("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   me: () => request<{ user: { id: number; name: string; email: string; role: string; isModerationBlocked?: boolean; moderationBlockedUntil?: string | null; moderationBlockReason?: string | null } }>("/api/auth/me"),

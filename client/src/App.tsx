@@ -1,3 +1,4 @@
+import ConfirmEmail from "./pages/ConfirmEmail";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Route, Switch, Redirect } from "wouter";
@@ -63,6 +64,7 @@ function Router() {
     <Route path="/" component={PublicHome} />
     <Route path="/criar-conta" component={AccountRoute} />
     <Route path="/login" component={LoginRoute} />
+    <Route path="/confirmar-email" component={ConfirmEmail} />
     <Route path="/conta-bloqueada"><Guarded><AccountBlocked /></Guarded></Route>
     <Route path="/inicio"><Guarded><Home /></Guarded></Route>
     <Route path="/para-consumidores"><Guarded><ParaConsumidores /></Guarded></Route>

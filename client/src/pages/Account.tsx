@@ -1,13 +1,13 @@
 import { FormEvent, useState } from "react";
-import { Link, useLocation } from "wouter";
-import { ArrowRight, Check, LockKeyhole, UserRound, Wrench } from "lucide-react";
+import { Link } from "wouter";
+import { ArrowRight, Check, Mail, LockKeyhole, UserRound, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import SiteHeader from "@/components/SiteHeader";
-import { useAuth } from "@/contexts/AuthContext";
+import { api } from "@/lib/api";
 
 type Role = "usuario" | "profissional";
 const roles = [
@@ -16,10 +16,8 @@ const roles = [
 ];
 
 export default function Account() {
-  const [, setLocation] = useLocation();
-  const { register } = useAuth();
   const [role, setRole] = useState<Role>(() => new URLSearchParams(window.location.search).get("perfil") === "profissional" ? "profissional" : "usuario");
-  const [created, setCreated] = useState(false);
+  const [pendingEmail, setPendingEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ name: "", email: "", password: "", specialty: "", city: "", state: "" });
@@ -30,8 +28,9 @@ export default function Account() {
     setError("");
     setLoading(true);
     try {
-      await register({ ...form, role });
-      setCreated(true);
+      const result = await api.register({ ...form, role });
+      setPendingEmail(result.email);
+      setForm((previous) => ({ ...previous, password: "" }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Não foi possível criar a conta.");
     } finally {
@@ -51,19 +50,18 @@ export default function Account() {
             <p className="mt-3 text-sm text-muted-foreground">Quer conhecer as etapas antes? <Link href="/como-funciona"><a className="font-semibold text-primary hover:underline">Veja como funciona</a></Link>.</p>
           </div>
 
-          {created ? (
+          {pendingEmail ? (
             <Card className="border-primary/20 bg-white shadow-lg">
               <CardContent className="flex flex-col items-start gap-6 p-8 md:p-12">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-green-100 text-green-700"><Check className="h-7 w-7" /></div>
+                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-blue-100 text-blue-700"><Mail className="h-7 w-7" /></div>
                 <div>
-                  <h2 className="text-2xl font-bold">Conta criada como {current.title.toLowerCase()}</h2>
-                  <p className="mt-2 text-muted-foreground">Seu cadastro foi salvo no banco de dados. Escolha para onde deseja continuar:</p>
+                  <h2 className="text-2xl font-bold">Confirme seu e-mail</h2>
+                  <p className="mt-2 text-muted-foreground">Enviamos um link para <strong>{pendingEmail}</strong>. Abra a mensagem e clique em <strong>Confirmar meu e-mail</strong> para ativar sua conta.</p>
+                  <p className="mt-2 text-sm text-muted-foreground">Confira a caixa de entrada, Todos os e-mails e a pasta Spam. O link expira em 30 minutos.</p>
                 </div>
                 <div className="flex flex-wrap gap-3">
-                  <Button onClick={() => setLocation("/painel")}>Ir para meu painel <ArrowRight className="ml-2 h-4 w-4" /></Button>
-                  <Link href="/comunidades"><a><Button variant="outline">Explorar comunidades</Button></a></Link>
-                  <Link href="/perfil"><a><Button variant="outline">Ver meu perfil</Button></a></Link>
-                  <Button variant="ghost" onClick={() => setCreated(false)}>Criar outra conta</Button>
+                  <Button asChild><Link href="/login">Ir para o login</Link></Button>
+                  <Button variant="outline" onClick={() => setPendingEmail("")}>Corrigir e-mail ou solicitar novo link</Button>
                 </div>
               </CardContent>
             </Card>
