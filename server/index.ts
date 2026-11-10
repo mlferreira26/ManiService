@@ -1174,12 +1174,57 @@ app.post("/api/conversations/:id/messages", requireUser, async (req, res) => {
   } catch (error) { console.error(error); jsonError(res, 500, "Não foi possível enviar a mensagem."); }
 });
 
+async function sendGmailHtml(
+  config: { clientId: string; clientSecret: string; refreshToken: string; from: string },
+  to: string,
+  subject: string,
+  html: string,
+) {
+  if (!/^[^\s<>@,;]+@[^\s<>@,;]+$/.test(to) || /[\r\n]/.test(config.from)) {
+    throw new Error("Endereço de e-mail inválido para envio.");
+  }
+  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    body: new URLSearchParams({
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: config.refreshToken,
+      grant_type: "refresh_token",
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!tokenResponse.ok) throw new Error("Google OAuth retornou HTTP " + tokenResponse.status);
+  const { access_token: accessToken } = await tokenResponse.json();
+  if (typeof accessToken !== "string" || !accessToken) throw new Error("Google OAuth não retornou um token de acesso.");
+
+  const body = Buffer.from(html, "utf8").toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? "";
+  const message = [
+    "From: " + config.from,
+    "To: " + to,
+    "Subject: " + subject,
+    "MIME-Version: 1.0",
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    body,
+  ].join("\r\n");
+  const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json" },
+    body: JSON.stringify({ raw: Buffer.from(message, "utf8").toString("base64url") }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!response.ok) throw new Error("Gmail API retornou HTTP " + response.status);
+}
+
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   if (!email) return jsonError(res, 400, "Informe o e-mail da conta.");
-  const resendApiKey = process.env.RESEND_API_KEY;
-  const mailFrom = process.env.MAIL_FROM;
-  if (!resendApiKey || !mailFrom) return jsonError(res, 503, "A recuperação por e-mail ainda não está configurada. Avise o administrador do ManiService.");
+  const clientId = process.env.GMAIL_CLIENT_ID?.trim();
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET?.trim();
+  const refreshToken = process.env.GMAIL_REFRESH_TOKEN?.trim();
+  const from = process.env.MAIL_FROM?.trim();
+  if (!clientId || !clientSecret || !refreshToken || !from) return jsonError(res, 503, "A recuperação por e-mail ainda não está configurada. Avise o administrador do ManiService.");
   try {
     const result = await pool.query("SELECT id, name, email FROM users WHERE LOWER(email) = LOWER($1) AND is_active = TRUE", [email]);
     // Keep the same successful response for known and unknown accounts.
@@ -1193,20 +1238,16 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     const resetUrl = `${appUrl}/login?resetToken=${rawToken}`;
     const htmlEscape: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
     const safeName = String(account.name).replace(/[&<>"']/g, (character) => htmlEscape[character]);
-    const emailResponse = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${resendApiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from: mailFrom,
-        to: [account.email],
-        subject: "Redefina sua senha do ManiService",
-        html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#172033"><h1>Redefinir senha</h1><p>Olá, ${safeName}. Recebemos um pedido para redefinir a senha da sua conta ManiService.</p><p><a href="${resetUrl}" style="display:inline-block;background:#1748e8;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">Criar nova senha</a></p><p>O link expira em 30 minutos e pode ser usado uma única vez. Se você não pediu a redefinição, ignore este e-mail.</p></div>`,
-      }),
-    });
-    if (!emailResponse.ok) {
+    try {
+      await sendGmailHtml(
+        { clientId, clientSecret, refreshToken, from },
+        account.email,
+        "Redefina sua senha do ManiService",
+        `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#172033"><h1>Redefinir senha</h1><p>Olá, ${safeName}. Recebemos um pedido para redefinir a senha da sua conta ManiService.</p><p><a href="${resetUrl}" style="display:inline-block;background:#1748e8;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">Criar nova senha</a></p><p>O link expira em 30 minutos e pode ser usado uma única vez. Se você não pediu a redefinição, ignore este e-mail.</p></div>`,
+      );
+    } catch (error) {
       await pool.query("UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = $1", [tokenHash]);
-      console.error("Resend recusou o envio de recuperação de senha:", emailResponse.status, await emailResponse.text());
-      return jsonError(res, 502, "Não foi possível enviar o e-mail agora. Confira a configuração de e-mail do ManiService.");
+      console.error("Falha no envio pela Gmail API:", error);
     }
     res.json({ ok: true, message: "Se o e-mail estiver cadastrado, enviaremos as instruções de recuperação." });
   } catch (error) {
