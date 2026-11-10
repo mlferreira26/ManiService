@@ -607,7 +607,8 @@ app.post("/api/auth/register", async (req, res) => {
     if (existing.rowCount) return jsonError(res, 409, "Este e-mail já está cadastrado.");
     const passwordHash = await hashPassword(password);
     const token = randomBytes(32).toString("hex");
-    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const browserKey = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(token + ":" + browserKey).digest("hex");
     const pending = await pool.query(
       `INSERT INTO pending_registrations (email, token_hash, registration, expires_at)
        VALUES ($1, $2, $3, NOW() + INTERVAL '30 minutes')
@@ -629,6 +630,7 @@ app.post("/api/auth/register", async (req, res) => {
       console.error("Falha no envio da confirmação pela Gmail API:", error);
       return jsonError(res, 502, "Não foi possível enviar a confirmação. Tente novamente.");
     }
+    res.cookie("maniservice_signup", browserKey, { httpOnly: true, secure: isHttps, sameSite: "lax", path: "/api/auth/confirm-email", maxAge: 30 * 60 * 1000 });
     res.status(202).json({ email: normalizedEmail });
   } catch (error) {
     console.error("Falha ao iniciar cadastro:", error);
@@ -638,17 +640,12 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.post("/api/auth/confirm-email", async (req, res) => {
   const token = String(req.body?.token || "");
-  const password = req.body?.password;
-  if (!/^[a-f0-9]{64}$/.test(token) || typeof password !== "string" || password.length > 256) return jsonError(res, 400, "Confira o link e a senha do cadastro.");
-  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const browserKey = getCookie(req, "maniservice_signup");
+  if (!/^[a-f0-9]{64}$/.test(token)) return jsonError(res, 400, "Link de confirmação inválido.");
+  if (!browserKey) return jsonError(res, 400, "Abra o link no mesmo navegador em que fez o cadastro.");
+  const tokenHash = createHash("sha256").update(token + ":" + browserKey).digest("hex");
   let client: PoolClient | undefined;
   try {
-    const pending = await pool.query(
-      "SELECT registration FROM pending_registrations WHERE token_hash = $1 AND expires_at > NOW()",
-      [tokenHash],
-    );
-    if (!pending.rows[0]) return jsonError(res, 400, "Este link expirou ou já foi usado.");
-    if (!(await verifyPassword(password, pending.rows[0].registration.passwordHash))) return jsonError(res, 400, "Informe a senha que você escolheu no cadastro.");
     client = await pool.connect();
     await client.query("BEGIN");
     const result = await client.query(
@@ -670,7 +667,14 @@ app.post("/api/auth/confirm-email", async (req, res) => {
     if (role === "profissional") {
       await client.query("INSERT INTO professional_profiles (user_id, specialty) VALUES ($1, $2)", [userId, specialty]);
     }
+    const previousSessionId = getCookie(req, sessionCookieName);
+    if (previousSessionId) await client.query("DELETE FROM sessions WHERE id = $1", [previousSessionId]);
+    const sessionId = randomUUID();
+    await client.query("INSERT INTO sessions (id, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 days')", [sessionId, userId]);
+    await client.query("UPDATE users SET last_login_at = NOW() WHERE id = $1", [userId]);
     await client.query("COMMIT");
+    res.cookie(sessionCookieName, sessionId, { httpOnly: true, secure: isHttps, sameSite: isHttps ? "none" : "lax", path: "/", maxAge: 30 * 24 * 60 * 60 * 1000 });
+    res.clearCookie("maniservice_signup", { path: "/api/auth/confirm-email", httpOnly: true, secure: isHttps, sameSite: "lax" });
     res.json({ ok: true });
   } catch (error) {
     await client?.query("ROLLBACK").catch(() => undefined);

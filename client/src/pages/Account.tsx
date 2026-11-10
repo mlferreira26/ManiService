@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { Link } from "wouter";
-import { ArrowRight, Check, Mail, LockKeyhole, UserRound, Wrench } from "lucide-react";
+import { ArrowRight, Check, Mail, UserRound, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -43,12 +43,12 @@ export default function Account() {
       <SiteHeader />
       <main className="container py-10 md:py-16">
         <div className="mx-auto max-w-5xl">
-          <div className="mb-10 max-w-2xl">
+          {!pendingEmail && <div className="mb-10 max-w-2xl">
             <Badge className="mb-4 bg-blue-100 text-blue-700 hover:bg-blue-100">Sua conta, do seu jeito</Badge>
             <h1 className="text-4xl font-bold tracking-tight md:text-5xl">Crie seu acesso à Mani Service</h1>
             <p className="mt-4 text-lg text-muted-foreground">Escolha como você participa da comunidade. Você poderá atualizar seus dados e completar o perfil depois.</p>
             <p className="mt-3 text-sm text-muted-foreground">Quer conhecer as etapas antes? <Link href="/como-funciona"><a className="font-semibold text-primary hover:underline">Veja como funciona</a></Link>.</p>
-          </div>
+          </div>}
 
           {pendingEmail ? (
             <Card className="border-primary/20 bg-white shadow-lg">
@@ -56,11 +56,10 @@ export default function Account() {
                 <div className="flex h-14 w-14 items-center justify-center rounded-full bg-blue-100 text-blue-700"><Mail className="h-7 w-7" /></div>
                 <div>
                   <h2 className="text-2xl font-bold">Confirme seu e-mail</h2>
-                  <p className="mt-2 text-muted-foreground">Enviamos um link para <strong>{pendingEmail}</strong>. Abra a mensagem e clique em <strong>Confirmar meu e-mail</strong> para ativar sua conta.</p>
-                  <p className="mt-2 text-sm text-muted-foreground">Confira a caixa de entrada, Todos os e-mails e a pasta Spam. O link expira em 30 minutos.</p>
+                  <p className="mt-2 text-muted-foreground">Enviamos um link para <strong>{pendingEmail}</strong>. Abra a mensagem e clique em <strong>Confirmar meu e-mail</strong>. Depois, selecione <strong>Confirmar e entrar</strong>.</p>
+                  <p className="mt-2 text-sm text-muted-foreground">Confira a caixa de entrada, Todos os e-mails e a pasta Spam. Abra o link no mesmo navegador em que fez o cadastro, em até 30 minutos.</p>
                 </div>
                 <div className="flex flex-wrap gap-3">
-                  <Button asChild><Link href="/login">Ir para o login</Link></Button>
                   <Button variant="outline" onClick={() => setPendingEmail("")}>Corrigir e-mail ou solicitar novo link</Button>
                 </div>
               </CardContent>
@@ -75,7 +74,6 @@ export default function Account() {
                     {role === id && <span className="mt-1 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground"><Check className="h-3 w-3" /></span>}
                   </button>
                 ))}
-                <div className="flex items-center gap-2 px-1 pt-4 text-sm text-muted-foreground"><LockKeyhole className="h-4 w-4 text-primary" /> Suas senhas são protegidas antes de serem armazenadas.</div>
               </div>
               <Card className="border-0 shadow-lg">
                 <CardHeader><CardTitle>Dados da conta</CardTitle><p className="text-sm text-muted-foreground">Cadastro de {current.title.toLowerCase()}</p></CardHeader>
