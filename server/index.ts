@@ -884,6 +884,12 @@ app.get("/api/profile/posts", requireUser, async (_req, res) => {
   }
 });
 
+// Public discovery uses the same rule for permanent and temporary blocks.
+const publicAccountSql = `
+  u.is_active = TRUE
+  AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+  AND (u.moderation_blocked_at IS NULL OR u.moderation_blocked_until <= NOW())
+`;
 app.get("/api/feed", requireUser, async (_req, res) => {
   try {
     const result = await pool.query(
@@ -895,15 +901,15 @@ app.get("/api/feed", requireUser, async (_req, res) => {
            (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = po.id) AS comments_count,
            EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = po.id AND pl.user_id = $1) AS liked_by_me
          FROM posts po JOIN users u ON u.id = po.user_id JOIN profiles p ON p.user_id = u.id
-         WHERE po.visibility = 'publico' AND po.moderation_removed_at IS NULL AND p.is_public = TRUE AND u.is_active = TRUE
-           AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+         WHERE po.visibility = 'publico' AND po.moderation_removed_at IS NULL AND p.is_public = TRUE
+           AND ${publicAccountSql}
          UNION ALL
          SELECT 'pedido'::text AS kind, sr.id, sr.title, sr.description, sr.image_url,
            sr.created_at, u.id AS author_id, u.name AS author_name, u.role AS author_role,
            p.avatar_url, sr.city, sr.state, 0::int AS likes_count, 0::int AS comments_count, FALSE AS liked_by_me
          FROM service_requests sr JOIN users u ON u.id = sr.user_id JOIN profiles p ON p.user_id = u.id
-         WHERE sr.status = 'aberto' AND p.is_public = TRUE AND u.is_active = TRUE
-           AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+         WHERE sr.status = 'aberto' AND p.is_public = TRUE
+           AND ${publicAccountSql}
        ) activity ORDER BY created_at DESC LIMIT 60`,
       [res.locals.user.id],
     );
@@ -925,8 +931,8 @@ app.get("/api/feed/completed-work", requireUser, async (_req, res) => {
          LEFT JOIN bookings b ON b.professional_id = u.id AND b.completion_image_url = po.image_url AND b.status = 'concluido'
          LEFT JOIN service_requests sr ON sr.id = b.request_id
          WHERE po.visibility = 'publico' AND po.image_url IS NOT NULL
-           AND po.moderation_removed_at IS NULL AND p.is_public = TRUE AND u.is_active = TRUE
-           AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+           AND po.moderation_removed_at IS NULL AND p.is_public = TRUE
+           AND ${publicAccountSql}
            AND (po.title ILIKE 'Serviço concluído:%' OR b.id IS NOT NULL)
          ORDER BY po.id, po.created_at DESC
        ) completed
@@ -960,8 +966,8 @@ app.get("/api/users/search", requireUser, async (req, res) => {
            )))))::numeric, 1) ELSE NULL END AS distance_km
        FROM users u JOIN profiles p ON p.user_id = u.id CROSS JOIN viewer v
        LEFT JOIN professional_profiles pp ON pp.user_id = u.id
-       WHERE u.is_active = TRUE AND p.is_public = TRUE AND u.id <> $1
-         AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+       WHERE p.is_public = TRUE AND u.id <> $1
+         AND ${publicAccountSql}
          AND ($2 = '' OR u.name ILIKE '%' || $2 || '%' OR COALESCE(pp.specialty, '') ILIKE '%' || $2 || '%')
          AND ($3 = 'todos' OR ($3 = 'usuario' AND u.role IN ('usuario', 'admin')) OR ($3 = 'profissional' AND u.role = 'profissional'))
          AND ($4 = '' OR p.city ILIKE '%' || $4 || '%')
@@ -1021,8 +1027,9 @@ app.post("/api/posts/:id/reaction", requireUser, async (req, res) => {
   if (!Number.isInteger(postId) || postId < 1) return jsonError(res, 400, "Publicação inválida.");
   try {
     const removed = await pool.query(
-      `DELETE FROM post_likes pl USING posts po, profiles p
-       WHERE pl.post_id = $1 AND pl.user_id = $2 AND po.id = pl.post_id AND po.moderation_removed_at IS NULL AND p.user_id = po.user_id
+      `DELETE FROM post_likes pl USING posts po, profiles p, users u
+       WHERE pl.post_id = $1 AND pl.user_id = $2 AND po.id = pl.post_id AND po.moderation_removed_at IS NULL AND p.user_id = po.user_id AND u.id = po.user_id
+         AND ${publicAccountSql}
        RETURNING pl.post_id`,
       [postId, res.locals.user.id],
     );
@@ -1030,8 +1037,8 @@ app.post("/api/posts/:id/reaction", requireUser, async (req, res) => {
     if (!removed.rows[0]) {
       const added = await pool.query(
         `INSERT INTO post_likes (post_id, user_id)
-         SELECT po.id, $2 FROM posts po JOIN profiles p ON p.user_id = po.user_id
-         WHERE po.id = $1 AND po.visibility = 'publico' AND po.moderation_removed_at IS NULL AND p.is_public = TRUE
+         SELECT po.id, $2 FROM posts po JOIN profiles p ON p.user_id = po.user_id JOIN users u ON u.id = po.user_id
+         WHERE po.id = $1 AND ${publicAccountSql} AND po.visibility = 'publico' AND po.moderation_removed_at IS NULL AND p.is_public = TRUE
          ON CONFLICT DO NOTHING RETURNING post_id`,
         [postId, res.locals.user.id],
       );
@@ -1050,8 +1057,8 @@ app.get("/api/posts/:id/comments", requireUser, async (req, res) => {
   if (!Number.isInteger(postId) || postId < 1) return jsonError(res, 400, "Publicação inválida.");
   try {
     const post = await pool.query(
-      `SELECT po.id FROM posts po JOIN profiles p ON p.user_id = po.user_id
-       WHERE po.id = $1 AND po.moderation_removed_at IS NULL AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))`,
+      `SELECT po.id FROM posts po JOIN profiles p ON p.user_id = po.user_id JOIN users u ON u.id = po.user_id
+       WHERE po.id = $1 AND ${publicAccountSql} AND po.moderation_removed_at IS NULL AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))`,
       [postId, res.locals.user.id],
     );
     if (!post.rows[0]) return jsonError(res, 404, "Publicação não encontrada ou indisponível.");
@@ -1059,7 +1066,7 @@ app.get("/api/posts/:id/comments", requireUser, async (req, res) => {
       `SELECT pc.id, pc.post_id, pc.user_id, pc.body, pc.created_at, u.name AS author_name, p.avatar_url AS author_avatar_url
        FROM post_comments pc JOIN users u ON u.id = pc.user_id
        LEFT JOIN profiles p ON p.user_id = u.id
-       WHERE pc.post_id = $1 ORDER BY pc.created_at ASC LIMIT 200`,
+       WHERE pc.post_id = $1 AND ${publicAccountSql} ORDER BY pc.created_at ASC LIMIT 200`,
       [postId],
     );
     res.json({ comments: result.rows });
@@ -1074,8 +1081,8 @@ app.post("/api/posts/:id/comments", requireUser, async (req, res) => {
   try {
     const result = await pool.query(
       `INSERT INTO post_comments (post_id, user_id, body)
-       SELECT po.id, $2, $3 FROM posts po JOIN profiles p ON p.user_id = po.user_id
-       WHERE po.id = $1 AND po.moderation_removed_at IS NULL AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))
+       SELECT po.id, $2, $3 FROM posts po JOIN profiles p ON p.user_id = po.user_id JOIN users u ON u.id = po.user_id
+       WHERE po.id = $1 AND ${publicAccountSql} AND po.moderation_removed_at IS NULL AND (po.user_id = $2 OR (po.visibility = 'publico' AND p.is_public = TRUE))
        RETURNING id, post_id, user_id, body, created_at`,
       [postId, res.locals.user.id, body],
     );
@@ -1358,7 +1365,7 @@ app.get("/api/service-requests", async (_req, res) => {
        JOIN users u ON u.id = sr.user_id
        LEFT JOIN service_request_interests sri ON sri.request_id = sr.id
        LEFT JOIN proposals p ON p.request_id = sr.id
-       WHERE u.is_active = TRUE AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+       WHERE ${publicAccountSql}
        GROUP BY sr.id, u.name
        ORDER BY sr.created_at DESC`,
     );
@@ -1385,7 +1392,7 @@ app.get("/api/professionals", async (req, res) => {
        JOIN professional_profiles pp ON pp.user_id = u.id
        LEFT JOIN follows f ON f.following_id = u.id
        WHERE u.role = 'profissional' AND u.is_active = TRUE AND p.is_public = TRUE
-         AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+         AND ${publicAccountSql}
          AND ($1 = '' OR u.name ILIKE '%' || $1 || '%' OR pp.specialty ILIKE '%' || $1 || '%')
          AND ($2 = '' OR pp.specialty ILIKE '%' || $2 || '%')
          AND ($3 = '' OR p.city ILIKE '%' || $3 || '%')
@@ -1424,7 +1431,7 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
        JOIN profiles p ON p.user_id = u.id
        LEFT JOIN professional_profiles pp ON pp.user_id = u.id
        WHERE u.id = $1 AND u.role IN ('profissional', 'usuario', 'admin')
-         AND u.is_active = TRUE AND (u.moderation_hidden_until IS NULL OR u.moderation_hidden_until <= NOW())
+         AND ${publicAccountSql}
          AND (p.is_public = TRUE OR u.id = $2)`,
       [professionalId, res.locals.user.id],
     );
@@ -1441,7 +1448,7 @@ app.get("/api/professionals/:id/profile", requireUser, async (req, res) => {
       pool.query(
         `SELECT r.id, r.rating, r.comment, r.created_at, u.name AS reviewer_name
          FROM reviews r JOIN users u ON u.id = r.reviewer_id
-         WHERE r.professional_id = $1 ORDER BY r.created_at DESC LIMIT 50`,
+         WHERE r.professional_id = $1 AND ${publicAccountSql} ORDER BY r.created_at DESC LIMIT 50`,
         [professionalId],
       ),
     ]);
