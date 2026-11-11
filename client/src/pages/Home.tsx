@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "wouter";
-import { ArrowRight, Paintbrush, Zap, Droplets, Hammer, Search, ShieldCheck, MessageCircle, ClipboardList, BriefcaseBusiness } from "lucide-react";
+import { ArrowRight, Paintbrush, Zap, Droplets, Hammer, MapPin, Search, ShieldCheck, MessageCircle, ClipboardList, BriefcaseBusiness } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import SiteHeader from "@/components/SiteHeader";
@@ -22,7 +22,7 @@ export default function Home() {
         <div className="container grid min-h-[520px] items-center gap-12 py-16 md:grid-cols-[1.05fr_0.95fr] md:py-24">
           <div>
             <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-blue-100 bg-white/80 px-3 py-1.5 text-sm font-semibold text-blue-800 shadow-sm"><span className="h-2 w-2 rounded-full bg-emerald-500" />Talento local, trabalho bem feito</div>
-            <h1 className="max-w-2xl text-4xl font-extrabold leading-[1.08] tracking-tight md:text-6xl">O profissional certo para <span className="text-blue-700">resolver de verdade.</span></h1>
+            <h1 className="max-w-2xl text-4xl font-extrabold leading-[1.08] tracking-tight md:text-6xl">O profissional certo para <span className="text-blue-700">resolver o seu problema.</span></h1>
             <p className="mt-5 max-w-xl text-lg leading-8 text-slate-600">Encontre trabalhadores autônomos da sua região, conheça o trabalho deles e converse diretamente para combinar seu serviço.</p>
             <form className="mt-8 flex max-w-xl flex-col gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-lg shadow-blue-900/5 sm:flex-row" onSubmit={(event) => { event.preventDefault(); window.location.href = `/profissionais${query.trim() ? `?search=${encodeURIComponent(query.trim())}` : ""}`; }}>
               <div className="flex min-w-0 flex-1 items-center gap-2 px-3"><Search className="h-5 w-5 shrink-0 text-blue-700" /><Input aria-label="Serviço ou profissional" className="border-0 px-0 shadow-none focus-visible:ring-0" placeholder="Qual serviço você precisa?" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
@@ -59,6 +59,33 @@ export default function Home() {
 
       <section className="container py-14"><div className="flex flex-col items-start justify-between gap-6 rounded-3xl bg-slate-900 p-8 text-white md:flex-row md:items-center md:p-10"><div className="max-w-xl"><p className="text-sm font-bold uppercase tracking-widest text-amber-300">Conexão de verdade</p><h2 className="mt-2 text-2xl font-bold">Um bom trabalho começa com uma boa conversa.</h2><p className="mt-2 text-sm leading-6 text-slate-300">Veja as informações disponíveis no perfil e alinhe escopo, preço e prazo com o profissional.</p></div><Link href="/profissionais"><a><Button className="rounded-xl bg-amber-400 text-slate-950 hover:bg-amber-300"><MessageCircle className="mr-2 h-4 w-4" />Começar a buscar</Button></a></Link></div></section>
     </main>
-    <footer className="border-t border-slate-200 bg-slate-100/90 py-8"><div className="container flex flex-col justify-between gap-3 text-sm text-slate-500 sm:flex-row"><span className="font-bold text-blue-800">ManiService</span><span>Conectando clientes e trabalhadores autônomos.</span><Link href="/como-funciona"><a className="font-medium text-blue-700 hover:underline">Como funciona</a></Link></div></footer>
+    <footer className="border-t border-slate-200 bg-slate-100/90 py-8">
+      <div className="container flex flex-col gap-5 text-sm text-slate-600 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <p className="font-bold text-blue-800">© ManiService</p>
+          <p className="flex items-center gap-1.5">
+            <MapPin aria-hidden="true" className="h-4 w-4 text-blue-700" />
+            Criado em Toledo, PR
+          </p>
+        </div>
+        <div className="space-y-1">
+          <p>
+            Desenvolvido por{" "}
+            <a
+              href="https://www.linkedin.com/in/matheuslavaqui"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-blue-800 underline underline-offset-4 hover:text-blue-950"
+            >
+              Matheus Lavaqui Ferreira
+            </a>
+          </p>
+          <p>Fundador do ManiService · Contato pelo LinkedIn</p>
+        </div>
+        <Link href="/como-funciona" className="font-medium text-blue-700 hover:underline">
+          Como funciona
+        </Link>
+      </div>
+    </footer>
   </div>;
 }
