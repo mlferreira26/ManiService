@@ -1140,23 +1140,21 @@ app.post("/api/conversations", requireUser, async (req, res) => {
   const requestedProfessionalId = Number(req.body?.professionalId);
   const requestedCustomerId = Number(req.body?.customerId);
   const requestId = req.body?.requestId ? Number(req.body.requestId) : null;
-  let customerId: number;
-  let professionalId: number;
-  if (res.locals.user.role === "usuario") {
-    customerId = Number(res.locals.user.id);
-    professionalId = requestedProfessionalId;
-    if (!professionalId || professionalId === customerId) return jsonError(res, 400, "Selecione um profissional válido.");
-  } else if (res.locals.user.role === "profissional") {
-    customerId = requestedCustomerId;
-    professionalId = Number(res.locals.user.id);
-    if (!customerId || customerId === professionalId || !requestId) return jsonError(res, 400, "Selecione um pedido de consumidor para iniciar a conversa.");
-  } else return jsonError(res, 403, "Sua conta não pode iniciar esta conversa.");
+  const viewer = res.locals.user;
+  const viewerId = Number(viewer.id);
+  if (!["usuario", "profissional"].includes(viewer.role)) return jsonError(res, 403, "Sua conta não pode iniciar esta conversa.");
+  const offeringService = viewer.role === "profissional" && requestId !== null;
+  const customerId = offeringService ? requestedCustomerId : viewerId;
+  const professionalId = offeringService ? viewerId : requestedProfessionalId;
+  if (!Number.isInteger(customerId) || !Number.isInteger(professionalId) || customerId < 1 || professionalId < 1 || customerId === professionalId) return jsonError(res, 400, "Selecione outro usuário para iniciar a conversa.");
   try {
-    const professional = await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'profissional' AND is_active = TRUE", [professionalId]);
-    if (!professional.rows[0]) return jsonError(res, 404, "Profissional não encontrado.");
-    const customer = await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'usuario' AND is_active = TRUE", [customerId]);
-    if (!customer.rows[0]) return jsonError(res, 404, "Consumidor não encontrado.");
-    if (res.locals.user.role === "profissional") {
+    const target = await pool.query(
+      `SELECT u.id FROM users u WHERE u.id = $1 AND ($2::boolean OR u.role = 'profissional') AND ${publicAccountSql}`,
+      [offeringService ? customerId : professionalId, offeringService],
+    );
+    if (!target.rows[0]) return jsonError(res, 404, "Conta indisponível para conversa.");
+    if (requestId !== null) {
+      if (!Number.isInteger(requestId) || requestId < 1) return jsonError(res, 400, "Pedido inválido.");
       const serviceRequest = await pool.query("SELECT id FROM service_requests WHERE id = $1 AND user_id = $2 AND status IN ('aberto', 'em_analise')", [requestId, customerId]);
       if (!serviceRequest.rows[0]) return jsonError(res, 404, "Pedido não encontrado ou indisponível.");
     }
@@ -1600,10 +1598,15 @@ app.post("/api/service-requests/:id/proposals", requireProfessional, async (req,
 
 app.get("/api/proposals", requireUser, async (req, res) => {
   try {
-    const query = res.locals.user.role === "profissional"
-      ? "SELECT p.*, sr.title, sr.description, u.name AS customer_name FROM proposals p JOIN service_requests sr ON sr.id = p.request_id JOIN users u ON u.id = sr.user_id WHERE p.professional_id = $1 ORDER BY p.created_at DESC"
-      : "SELECT p.*, sr.title, sr.description, u.name AS professional_name FROM proposals p JOIN service_requests sr ON sr.id = p.request_id JOIN users u ON u.id = p.professional_id WHERE sr.user_id = $1 ORDER BY p.created_at DESC";
-    const result = await pool.query(query, [res.locals.user.id]);
+    const result = await pool.query(
+      `SELECT p.*, sr.title, sr.description, sr.user_id AS customer_id,
+         customer.name AS customer_name, professional.name AS professional_name
+       FROM proposals p JOIN service_requests sr ON sr.id = p.request_id
+       JOIN users customer ON customer.id = sr.user_id
+       JOIN users professional ON professional.id = p.professional_id
+       WHERE sr.user_id = $1 OR p.professional_id = $1 ORDER BY p.created_at DESC`,
+      [res.locals.user.id],
+    );
     res.json({ proposals: result.rows });
   } catch (error) {
     console.error(error);
@@ -1816,15 +1819,24 @@ app.post("/api/bookings/:id/confirm", requireUser, async (req, res) => {
     await addBookingChatEvent(client, booking, res.locals.user.id, paidDirectly
       ? `O cliente confirmou a conclusão e informou que pagou diretamente ao profissional (R$ ${finalAmount.toFixed(2).replace(".", ",")}).`
       : "O cliente confirmou a conclusão do serviço.");
-    if (paidDirectly) {
+    if (paidDirectly && finalAmount > 0) {
       await client.query(
         `INSERT INTO wallet_entries (user_id, booking_id, entry_type, description, amount, payment_method, report_source, reported_by_user_id)
-         SELECT b.professional_id, b.id, 'receita', 'Serviço concluído: ' || COALESCE(sr.title, 'serviço'), $2,
+         SELECT b.professional_id, b.id, 'receita', LEFT('Serviço concluído: ' || COALESCE(sr.title, 'serviço'), 240), $2,
            'informado pelo cliente', 'cliente_confirmou', $3
          FROM bookings b LEFT JOIN service_requests sr ON sr.id = b.request_id WHERE b.id = $1
          ON CONFLICT DO NOTHING`,
         [booking.id, finalAmount, res.locals.user.id],
       );
+      if (res.locals.user.role === "profissional") {
+        await client.query(
+          `INSERT INTO wallet_entries (user_id, booking_id, entry_type, description, amount, payment_method, report_source, reported_by_user_id)
+           SELECT b.customer_id, b.id, 'despesa', LEFT('Serviço contratado: ' || COALESCE(sr.title, 'serviço'), 240),
+             $2, 'pagamento direto', 'cliente_confirmou', b.customer_id
+           FROM bookings b LEFT JOIN service_requests sr ON sr.id = b.request_id WHERE b.id = $1`,
+          [booking.id, finalAmount],
+        );
+      }
     }
     if (booking.completion_image_url) {
       await client.query(

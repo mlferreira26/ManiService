@@ -237,7 +237,7 @@ export default function ProfessionalsLive() {
                           </Button>
                         </a>
                       </Link>
-                      {user?.role === "usuario" &&
+                      {(user?.role === "usuario" || user?.role === "profissional") &&
                         person.role === "profissional" && (
                           <Button
                             className="mt-2 w-full rounded-xl"
